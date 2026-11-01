@@ -7,7 +7,7 @@ export interface Evidence {
   path: string;
   line: number;
   protocol: string;
-  confidence: number;
+  confidence: 'HIGH' | 'MEDIUM' | 'LOW';
   snippet?: string;
 }
 

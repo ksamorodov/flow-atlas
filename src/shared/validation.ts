@@ -47,14 +47,55 @@ function jsonValue(value: unknown, depth = 0): JsonValue {
   throw new TypeError('Graph data must contain only JSON values');
 }
 
+function assertJsonCompatible(value: unknown, ancestors = new Set<object>(), depth = 0): void {
+  if (depth > 20) throw new TypeError('Graph data exceeds the maximum nesting depth');
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) throw new TypeError('Graph data numbers must be finite');
+    return;
+  }
+  if (typeof value !== 'object') throw new TypeError('Graph must contain only JSON values');
+  if (ancestors.has(value)) throw new TypeError('Graph must not contain circular references');
+
+  const isArray = Array.isArray(value);
+  const prototype = Object.getPrototypeOf(value) as object | null;
+  if (isArray ? prototype !== Array.prototype : prototype !== Object.prototype && prototype !== null) {
+    throw new TypeError('Graph must contain only plain JSON objects and arrays');
+  }
+
+  ancestors.add(value);
+  if (isArray) {
+    const array = value as unknown[];
+    const keys = Reflect.ownKeys(array);
+    if (keys.length !== array.length + 1 || keys.some((key) => typeof key !== 'string' || (key !== 'length' && String(Number(key)) !== key))) {
+      throw new TypeError('Graph arrays must not have extra properties');
+    }
+    for (let index = 0; index < array.length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(array, String(index));
+      if (!descriptor || !descriptor.enumerable || !('value' in descriptor)) {
+        throw new TypeError('Graph arrays must not be sparse or contain accessors');
+      }
+      assertJsonCompatible(descriptor.value, ancestors, depth + 1);
+    }
+  } else {
+    for (const key of Reflect.ownKeys(value)) {
+      if (typeof key !== 'string') throw new TypeError('Graph objects must not contain symbol keys');
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || !descriptor.enumerable || !('value' in descriptor)) {
+        throw new TypeError('Graph objects must contain enumerable data properties only');
+      }
+      assertJsonCompatible(descriptor.value, ancestors, depth + 1);
+    }
+  }
+  ancestors.delete(value);
+}
+
 function evidence(input: unknown): Evidence {
   const value = record(input, 'Evidence');
   const line = value.line;
   const confidence = value.confidence;
   if (!Number.isSafeInteger(line) || (line as number) < 1) throw new TypeError('Evidence line must be a positive integer');
-  if (typeof confidence !== 'number' || !Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
-    throw new TypeError('Evidence confidence must be between 0 and 1');
-  }
+  if (confidence !== 'HIGH' && confidence !== 'MEDIUM' && confidence !== 'LOW') throw new TypeError('Evidence confidence must be HIGH, MEDIUM, or LOW');
   const output: Evidence = {
     path: boundedString(value.path, 'Evidence path'),
     line: line as number,
@@ -113,6 +154,7 @@ function parseGraph(value: unknown): GraphDocument {
 }
 
 export function validateGraph(input: unknown): GraphDocument {
+  assertJsonCompatible(input);
   let serialized: string | undefined;
   try {
     serialized = JSON.stringify(input);

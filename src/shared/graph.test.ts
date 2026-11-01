@@ -38,6 +38,32 @@ test('validateGraph enforces evidence bounds and rejects oversized JSON', () => 
   assert.throws(() => validateGraph({ ...minimalGraph, nodes: [{ ...minimalGraph.nodes[0], data: { text: 'x'.repeat(1_000_001) } }] }));
 });
 
+test('validateGraph rejects non-JSON values before serialization can coerce or drop them', () => {
+  for (const value of [Number.NaN, Number.POSITIVE_INFINITY, undefined, () => 'not JSON']) {
+    const input = {
+      ...minimalGraph,
+      nodes: [{ ...minimalGraph.nodes[0], data: { nested: [{ value }] } }],
+      edges: [],
+    };
+    assert.throws(() => validateGraph(input));
+  }
+});
+
+test('evidence confidence is one of the documented categories', () => {
+  const withEvidence = {
+    ...minimalGraph,
+    edges: [{
+      ...minimalGraph.edges[0],
+      evidence: [{ path: 'src/Api.java', line: 12, protocol: 'postgres', confidence: 'HIGH' }],
+    }],
+  };
+  assert.deepEqual(validateGraph(withEvidence).edges[0].evidence[0].confidence, 'HIGH');
+  assert.throws(() => validateGraph({
+    ...withEvidence,
+    edges: [{ ...withEvidence.edges[0], evidence: [{ ...withEvidence.edges[0].evidence[0], confidence: 'certain' }] }],
+  }));
+});
+
 test('each named preset produces a valid graph with nonempty nodes and edges', () => {
   for (const name of ['microservices', 'event-driven'] as const) {
     const graph = createPreset(name);
@@ -89,4 +115,38 @@ test('failures propagate upstream, track retries, and recover when cleared', () 
   const recovered = stepSimulation(chain, { intensity: 1, paused: false }, 99, 7, failed);
   assert.ok(recovered.nodes.every(({ errorRate }) => errorRate === 0));
   assert.ok(recovered.nodes.every(({ retries }) => retries === 0));
+});
+
+test('failure propagation terminates across a cycle and shared diamond dependencies', () => {
+  const graph: GraphDocument = {
+    version: 1,
+    nodes: ['root', 'left', 'right', 'store'].map((id, index) => ({
+      id,
+      type: 'service',
+      position: { x: index, y: 0 },
+      data: { label: id },
+    })),
+    edges: [
+      { id: 'root-left', source: 'root', target: 'left', evidence: [] },
+      { id: 'root-right', source: 'root', target: 'right', evidence: [] },
+      { id: 'left-store', source: 'left', target: 'store', evidence: [] },
+      { id: 'right-store', source: 'right', target: 'store', evidence: [] },
+      { id: 'store-root', source: 'store', target: 'root', evidence: [] },
+    ],
+  };
+  const frame = stepSimulation(graph, { intensity: 1, paused: false, failedNodeIds: ['store'] }, 7, 2);
+  assert.equal(frame.nodes.length, 4);
+  assert.ok(frame.nodes.every(({ errors }) => errors > 0));
+});
+
+test('single-node simulation locks the seeded metric semantics including retries in rps', () => {
+  const graph: GraphDocument = {
+    version: 1,
+    nodes: [{ id: 'only', type: 'service', position: { x: 0, y: 0 }, data: { label: 'Only' } }],
+    edges: [],
+  };
+  assert.deepEqual(stepSimulation(graph, { intensity: 1, paused: false }, 1, 0), {
+    tick: 0,
+    nodes: [{ id: 'only', status: 'healthy', rps: 7, latencyMs: 30, errorRate: 0, attempts: 7, errors: 0, retries: 0 }],
+  });
 });
