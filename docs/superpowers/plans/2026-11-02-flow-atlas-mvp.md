@@ -57,10 +57,10 @@
 
 **Interfaces:** `listRoots(): SafeRoot[]`; `discover(rootId: string): Promise<GraphDocument>`; `POST /api/discover` accepts exactly `{ rootId }`. Root resolution canonicalizes configured roots and all candidates, refuses symlink escapes, enforces file/depth/byte caps, and exposes no path-taking read API. Findings normalize stable IDs and include `{ path, line, protocol, confidence }` evidence.
 
-- [ ] **RED** Create synthetic Maven/Gradle multi-module fixtures with Spring service, Feign/RestTemplate/WebClient/HTTP interface calls, Kafka/Rabbit, PostgreSQL/Redis, Compose, and Kubernetes; test expected findings and evidence. Add symlink escape, traversal, unconfigured-root, oversized-input, malformed-body, origin, and response-bound tests; run targeted tests and observe failure.
-- [ ] **GREEN** Implement deterministic parsers, deduplication, canonical allowlist traversal, bounded same-origin API, and loopback-only server. Keep the configured default root fixture-only; gate any additional roots behind explicit CLI/environment configuration.
-- [ ] **VERIFY** Run server tests and typecheck; repeat fixture scan and compare output byte-for-byte; verify a test outside the allowlist is never read.
-- [ ] **COMMIT** `git add ... && git commit -m "feat: add safe deterministic repository discovery"`.
+- [x] **RED** Create synthetic Maven/Gradle multi-module fixtures with Spring service, Feign/RestTemplate/WebClient/HTTP interface calls, Kafka/Rabbit, PostgreSQL/Redis, Compose, and Kubernetes; test expected findings and evidence. Add symlink escape, traversal, unconfigured-root, oversized-input, malformed-body, origin, and response-bound tests; run targeted tests and observe failure.
+- [x] **GREEN** Implement deterministic parsers, deduplication, canonical allowlist traversal, bounded same-origin API, and loopback-only server. Keep the configured default root fixture-only; gate any additional roots behind explicit CLI/environment configuration.
+- [x] **VERIFY** Run server tests and typecheck; repeat fixture scan and compare output byte-for-byte; verify a test outside the allowlist is never read. (Native tests and deterministic fixture check passed; typecheck unavailable because `tsc` is not installed.)
+- [x] **COMMIT** `git add ... && git commit -m "feat: add safe deterministic repository discovery"`.
 
 ## Task 3: Polished graph editor, discovery, and evidence UX
 
