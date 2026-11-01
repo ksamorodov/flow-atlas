@@ -36,3 +36,10 @@ test('walk bounds bytes and directory entries, including irrelevant filenames', 
     await assert.rejects(walkFiles(base, { maxEntries: 1 }), /entry limit/);
   } finally { await rm(base, { recursive: true, force: true }); }
 });
+
+test('walk excludes plural sensitive filenames without rejecting secretary.java', async () => {
+  const root = new URL('../fixtures/scanner-regressions/', import.meta.url).pathname;
+  const files = await walkFiles(root);
+  assert.equal(files.some((file) => /(?:secrets\.yaml|credentials\.xml|passwords\.properties)$/.test(file.path)), false);
+  assert.equal(files.some((file) => file.path.endsWith('secretary.java')), true);
+});

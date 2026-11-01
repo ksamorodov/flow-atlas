@@ -1,0 +1,3 @@
+services:
+ broken [
+name: random-not-an-application-name

@@ -1,118 +1,319 @@
+import { basename, dirname } from 'node:path';
 import { validateGraph } from '../../src/shared/validation.ts';
-import type { AtlasEdge, AtlasNode, Evidence, GraphDocument, NodeType } from '../../src/shared/graph.ts';
+import type { AtlasEdge, AtlasNode, Evidence, GraphDocument, JsonValue, NodeType } from '../../src/shared/graph.ts';
 import { resolveRoot, type RootOptions } from '../security/roots.ts';
 import { walkFiles, type ScannedFile } from '../security/walk.ts';
 
-export interface DiscoverOptions extends RootOptions { limits?: { maxFiles?: number; maxBytes?: number; maxDepth?: number; maxEntries?: number } }
-type Finding = { from: string; to: string; protocol: string; evidence: Evidence };
-const slug = (value: string): string => value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60) || 'unknown';
-const nodeId = (type: NodeType, name: string): string => `${type}:${slug(name)}`;
-const safeTargetName = (raw: string): string => {
-  try { const url = new URL(raw.replace(/^jdbc:/, '')); return url.hostname || 'configured endpoint'; } catch { return raw.replace(/[^a-zA-Z0-9._-]/g, '').slice(0, 80) || 'configured endpoint'; }
-};
-function sourceLines(files: ScannedFile[]): Array<{ file: ScannedFile; line: number; text: string }> {
-  return files.flatMap((file) => {
-    const isJava = /\.(java|kt)$/i.test(file.path);
-    const content = isJava ? file.content.replace(/\/\*[\s\S]*?\*\//g, (comment) => comment.replace(/[^\n]/g, '')) : file.content;
-    return content.split(/\r?\n/).map((original, index) => {
-      let text = original;
-      if (isJava) {
-        let quote = '';
-        let escaped = false;
-        for (let position = 0; position < text.length - 1; position += 1) {
-          const char = text[position];
-          if (escaped) { escaped = false; continue; }
-          if (char === '\\' && quote) { escaped = true; continue; }
-          if ((char === '"' || char === "'") && (!quote || quote === char)) { quote = quote ? '' : char; continue; }
-          if (!quote && char === '/' && text[position + 1] === '/') { text = text.slice(0, position); break; }
-        }
-      }
-      return { file, line: index + 1, text: text.trim() };
-    });
-  }).filter(({ text }) => text && !text.startsWith('//') && !text.startsWith('*') && !text.startsWith('#'));
+export interface DiscoverOptions extends RootOptions {
+  limits?: { maxFiles?: number; maxBytes?: number; maxDepth?: number; maxEntries?: number; maxMillis?: number };
+}
+type Finding = { from: string; to: string; protocol: string; evidence: Evidence; identity: string };
+type ModuleInfo = { directory: string; name: string; id: string; repository: string };
+type FlatValue = { key: string; value: string; line: number };
+const slug = (value: string): string => value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 48) || 'item';
+function hash(value: string): string {
+  let result = 2166136261;
+  for (let index = 0; index < value.length; index += 1) result = Math.imul(result ^ value.charCodeAt(index), 16777619);
+  return (result >>> 0).toString(16).padStart(8, '0');
+}
+function nodeId(type: NodeType, label: string, identity: string): string { return `${type}:${slug(label)}-${hash(identity)}`; }
+function withoutComments(content: string): string {
+  const noBlocks = content.replace(/\/\*[\s\S]*?\*\//g, (comment) => comment.replace(/[^\n]/g, ''));
+  return noBlocks.split(/\r?\n/).map((line) => {
+    let quote = '', escaped = false;
+    for (let index = 0; index < line.length - 1; index += 1) {
+      const char = line[index];
+      if (escaped) { escaped = false; continue; }
+      if (char === '\\' && quote) { escaped = true; continue; }
+      if ((char === '"' || char === "'") && (!quote || quote === char)) { quote = quote ? '' : char; continue; }
+      if (!quote && char === '/' && line[index + 1] === '/') return line.slice(0, index);
+    }
+    return line;
+  }).join('\n');
+}
+function linesOf(file: ScannedFile, content = file.content): Array<{ file: ScannedFile; line: number; text: string }> {
+  return content.split(/\r?\n/).map((text, index) => ({ file, line: index + 1, text: text.trim() })).filter(({ text }) => text.length > 0);
+}
+function rawLines(file: ScannedFile, content = file.content): Array<{ line: number; text: string }> {
+  return content.split(/\r?\n/).map((text, index) => ({ line: index + 1, text }));
+}
+function yamlValue(value: string): string {
+  const trimmed = value.trim();
+  if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) return trimmed.slice(1, -1);
+  return trimmed.replace(/\s+#.*$/, '').trim();
+}
+function configValues(file: ScannedFile): FlatValue[] {
+  const result: FlatValue[] = [];
+  if (/\.properties$/i.test(file.path)) {
+    for (const { line, text } of linesOf(file)) {
+      const clean = text.replace(/\s+#.*$/, '').trim();
+      if (!clean || clean.startsWith('#') || clean.startsWith('!')) continue;
+      const match = clean.match(/^([^=:\s]+)\s*[=:]\s*(.*)$/);
+      if (match) result.push({ key: match[1], value: yamlValue(match[2]), line });
+    }
+    return result;
+  }
+  const stack: Array<{ indent: number; key: string }> = [];
+  for (const { line, text } of rawLines(file)) {
+    const clean = text.replace(/\s+#.*$/, '').trimEnd();
+    if (!clean.trim() || clean.trim().startsWith('#') || clean.trim() === '---') { stack.length = 0; continue; }
+    const indent = text.match(/^\s*/)?.[0].length ?? 0;
+    const match = clean.trim().match(/^([A-Za-z0-9_.-]+):(?:\s*(.*))?$/);
+    if (!match) continue;
+    while (stack.length > 0 && stack[stack.length - 1].indent >= indent) stack.pop();
+    const key = [...stack.map((part) => part.key), match[1]].join('.');
+    const value = yamlValue(match[2] ?? '');
+    if (value) result.push({ key, value, line });
+    else stack.push({ indent, key: match[1] });
+  }
+  return result;
+}
+function serviceDisplay(raw: string, fallback: string): string {
+  const candidate = raw.trim().replace(/^['"]|['"]$/g, '');
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(candidate) || /secret|credential|password|token/i.test(candidate)) return fallback;
+  return candidate;
+}
+function hostPort(raw: string, protocol: 'PostgreSQL' | 'Redis'): { host: string; port: string } | undefined {
+  try {
+    const url = new URL(raw.replace(/^jdbc:/i, ''));
+    if (protocol === 'PostgreSQL' && !/^postgres(?:ql)?$/i.test(url.protocol.replace(':', ''))) return undefined;
+    if (protocol === 'Redis' && url.protocol !== 'redis:') return undefined;
+    if (!url.hostname) return undefined;
+    return { host: url.hostname.toLowerCase(), port: url.port || (protocol === 'PostgreSQL' ? '5432' : '6379') };
+  } catch { return undefined; }
+}
+function httpHost(raw: string): string | undefined {
+  try {
+    const url = new URL(raw);
+    return (url.protocol === 'http:' || url.protocol === 'https:') && url.hostname ? url.hostname.toLowerCase() : undefined;
+  } catch { return undefined; }
+}
+function annotationEntries(content: string, pattern: RegExp): Array<{ line: number; args: string }> {
+  const entries: Array<{ line: number; args: string }> = [];
+  for (const match of content.matchAll(pattern)) {
+    const start = match.index ?? 0;
+    entries.push({ line: content.slice(0, start).split('\n').length, args: match[1] ?? '' });
+  }
+  return entries;
+}
+function kubernetesContainerImages(document: string): string[] {
+  const images: string[] = [];
+  let containersIndent = -1;
+  let itemIndent = -1;
+  for (const raw of document.split(/\r?\n/)) {
+    const indent = raw.length - raw.trimStart().length;
+    const text = raw.trim();
+    if (text === 'containers:') { containersIndent = indent; itemIndent = -1; continue; }
+    if (containersIndent < 0 || !text) continue;
+    if (indent <= containersIndent) { containersIndent = -1; itemIndent = -1; continue; }
+    if (indent === containersIndent + 2 && /^-\s+name\s*:/.test(text)) { itemIndent = indent; continue; }
+    if (itemIndent >= 0 && indent > itemIndent && indent <= itemIndent + 2) {
+      const image = text.match(/^image:\s*([^\s#]+)/)?.[1];
+      if (image) images.push(image);
+    }
+  }
+  return images;
 }
 
 export async function discover(rootId: string, options: DiscoverOptions = {}): Promise<GraphDocument> {
   const root = await resolveRoot(rootId, options);
   const files = await walkFiles(root.path, options.limits);
-  const lines = sourceLines(files);
-  const serviceNames = new Map<string, string>();
-  for (const file of files.filter((entry) => /\.(java|kt)$/.test(entry.path))) {
-    const module = file.path.split('/')[0];
-    const config = files.find((entry) => entry.path.startsWith(`${module}/`) && /application\.(properties|ya?ml)$/i.test(entry.path));
-    const appName = config?.content.match(/(?:spring\.application\.name\s*[=:]\s*|name:\s*)([a-zA-Z0-9._-]+)/)?.[1];
-    if (/@(?:org\.springframework\.boot\.autoconfigure\.SpringBootApplication|SpringBootApplication)/.test(file.content)) serviceNames.set(module, appName ?? module);
+  const descriptors = new Set(['']);
+  for (const file of files) if (/(?:^|\/)(?:pom\.xml|build\.gradle(?:\.kts)?)$/i.test(file.path)) descriptors.add(dirname(file.path) === '.' ? '' : dirname(file.path));
+  const moduleDirs = [...descriptors].sort((a, b) => a.length - b.length || a.localeCompare(b));
+  const moduleFor = (filePath: string): string => moduleDirs.filter((directory) => directory === '' || filePath.startsWith(`${directory}/`)).sort((a, b) => b.length - a.length)[0] ?? '';
+  const propsByModule = new Map<string, Array<{ file: ScannedFile; value: FlatValue }>>();
+  for (const file of files.filter((entry) => /(?:^|\/)application\.(?:properties|ya?ml)$/i.test(entry.path))) {
+    const owner = moduleFor(file.path);
+    const values = configValues(file).map((value) => ({ file, value }));
+    propsByModule.set(owner, [...(propsByModule.get(owner) ?? []), ...values]);
   }
+  const serviceModules = new Map<string, ModuleInfo>();
+  for (const file of files.filter((entry) => /\.(?:java|kt)$/i.test(entry.path))) {
+    const clean = withoutComments(file.content);
+    if (!/@(?:[\w.]+\.)?SpringBootApplication\b/.test(clean)) continue;
+    const directory = moduleFor(file.path);
+    const fallback = basename(directory) || basename(root.path) || 'service';
+    const appValue = (propsByModule.get(directory) ?? []).find(({ value }) => value.key === 'spring.application.name')?.value.value;
+    const name = serviceDisplay(appValue ?? fallback, fallback);
+    const repository = directory || '.';
+    const identity = `source-module:${repository}`;
+    serviceModules.set(directory, { directory, name, id: nodeId('service', name, identity), repository });
+  }
+
   const nodes = new Map<string, AtlasNode>();
-  const edges: AtlasEdge[] = [];
   const findings: Finding[] = [];
-  const ensure = (type: NodeType, name: string): string => {
-    const id = nodeId(type, name);
-    if (!nodes.has(id)) nodes.set(id, { id, type, position: { x: 0, y: 0 }, data: { name: name.slice(0, 100) } });
+  const ensure = (type: NodeType, name: string, identity: string, data: Record<string, JsonValue>): string => {
+    const id = nodeId(type, name, identity);
+    if (!nodes.has(id)) nodes.set(id, { id, type, position: { x: 0, y: 0 }, data: { name: name.slice(0, 100), ...data } });
     return id;
   };
-  for (const name of serviceNames.values()) ensure('service', name);
-  const serviceFor = (path: string): string => {
-    const module = path.split('/')[0];
-    const name = serviceNames.get(module) ?? module;
-    return ensure('service', name);
+  for (const service of serviceModules.values()) ensure('service', service.name, `source-module:${service.repository}`, { repository: service.repository });
+  const ownerOf = (file: ScannedFile): ModuleInfo | undefined => serviceModules.get(moduleFor(file.path));
+  const externalOrService = (raw: string, repository: string): string | undefined => {
+    const normalized = raw.toLowerCase().replace(/\.$/, '');
+    for (const service of serviceModules.values()) {
+      const moduleName = basename(service.directory).toLowerCase();
+      const appName = service.name.toLowerCase();
+      if (normalized === moduleName || normalized === appName || normalized.startsWith(`${moduleName}.`) || normalized.startsWith(`${appName}.`)) return service.id;
+    }
+    if (!/^[a-zA-Z0-9.-]{1,253}$/.test(raw)) return undefined;
+    return ensure('external', raw.toLowerCase(), `external:${raw.toLowerCase()}`, { repository });
   };
-  const addFinding = (from: string, to: string, protocol: string, file: ScannedFile, line: number, confidence: Evidence['confidence']): void => {
-    findings.push({ from, to, protocol, evidence: { path: file.path, line, protocol, confidence } });
+  const add = (from: string, to: string, protocol: string, file: ScannedFile, line: number, confidence: Evidence['confidence'], identity: string): void => {
+    findings.push({ from, to, protocol, identity, evidence: { path: file.path, line, protocol, confidence } });
   };
-  for (const { file, line, text } of lines) {
-    const isSource = /\.(java|kt)$/i.test(file.path);
-    const isConfig = /application\.(?:properties|ya?ml)$/i.test(file.path);
-    const isInfrastructure = /(?:compose|docker-compose|deploy|k8s|kubernetes).*\.ya?ml$/i.test(file.path);
-    if (!isSource && !isConfig && !isInfrastructure) continue;
-    if (isInfrastructure) {
-      if (/image:\s*postgres(?::|\s|$)/i.test(text)) ensure('database', 'postgresql');
-      if (/image:\s*redis(?::|\s|$)/i.test(text)) ensure('cache', 'redis');
-      const declaration = text.match(/^\s{2}([a-zA-Z0-9_-]+):\s*$/);
-      if (declaration && /postgres|database|db/i.test(declaration[1])) ensure('database', declaration[1]);
-      else if (declaration && /redis|cache/i.test(declaration[1])) ensure('cache', declaration[1]);
-      const k8sName = text.match(/^\s*name:\s*([a-zA-Z0-9._-]+)/)?.[1];
-      if (k8sName && /(?:deploy|k8s|kubernetes).*\.ya?ml$/i.test(file.path)) ensure('service', k8sName);
-      continue;
+  const infra = (type: 'database' | 'cache', host: string, port: string, repository: string): string => {
+    const label = host;
+    return ensure(type, label, `${type}:${host}:${port}`, { repository, port });
+  };
+
+  for (const file of files.filter((entry) => /\.(?:java|kt)$/i.test(entry.path))) {
+    const owner = ownerOf(file);
+    if (!owner) continue;
+    const content = withoutComments(file.content);
+    const codeLines = linesOf(file, content);
+    for (const line of codeLines) {
+      const text = line.text;
+      const directUrl = text.match(/(?:getForObject|postForObject|exchange|\.uri)\s*\([^)]*["'](https?:\/\/[^"']+)/)?.[1];
+      const webClientUrl = text.match(/(?:\.baseUrl|WebClient\.create)\s*\(\s*["'](https?:\/\/[^"']+)/)?.[1];
+      if (directUrl || webClientUrl) {
+        const host = httpHost(directUrl ?? webClientUrl ?? '');
+        const target = host ? externalOrService(host, owner.repository) : undefined;
+        if (target) add(owner.id, target, 'HTTP', file, line.line, 'HIGH', `HTTP:${owner.id}:${target}`);
+      }
     }
-    const from = serviceFor(file.path);
-    const code = text.replace(/"(?:\\.|[^"\\])*"/g, (value) => value);
-    const urlMatch = code.match(/https?:\/\/[^"'\s)]+/);
-    const feignTarget = code.match(/FeignClient[^)]*\bname\s*=\s*["']([^"']+)["']/)?.[1];
-    if ((urlMatch || feignTarget) && /(getForObject|postForObject|exchange|\.uri\(|FeignClient|HttpExchange|GetExchange|PostExchange)/.test(code)) {
-      const target = urlMatch ? safeTargetName(urlMatch[0]) : safeTargetName(feignTarget ?? 'configured endpoint');
-      const to = ensure('service', target);
-      addFinding(from, to, 'HTTP', file, line, urlMatch && /getForObject|postForObject|exchange\(|\.uri\(/.test(code) ? 'HIGH' : 'MEDIUM');
+    for (const annotation of annotationEntries(content, /@(?:[\w.]+\.)?FeignClient\s*\(([\s\S]*?)\)/g)) {
+      const targetName = annotation.args.match(/\b(?:name|value)\s*=\s*["']([^"']+)["']/)?.[1];
+      const url = annotation.args.match(/\burl\s*=\s*["']([^"']+)["']/)?.[1];
+      const placeholder = url?.match(/^\$\{(clients\.[A-Za-z0-9_-]+\.url)\}$/)?.[1];
+      const clientValue = (propsByModule.get(moduleFor(file.path)) ?? []).find(({ value }) => value.key === placeholder)?.value.value;
+      const alias = targetName ?? (clientValue && httpHost(clientValue) ? placeholder?.split('.')[1] : undefined);
+      const target = alias ? externalOrService(alias, owner.repository) : undefined;
+      if (target) add(owner.id, target, 'HTTP', file, annotation.line, 'HIGH', `HTTP:${owner.id}:${target}`);
     }
-    const kafkaSend = code.match(/\.send\(\s*["']([^"']+)["']/);
-    const kafkaListen = code.match(/(?:KafkaListener|topics\s*=)\s*\(?\s*(?:topics\s*=\s*)?["']([^"']+)["']/);
-    const rabbitSend = code.match(/convertAndSend\(\s*["']([^"']+)["']\s*,\s*["']([^"']+)["']/);
-    const rabbitListen = code.match(/RabbitListener\s*\([^)]*(?:queues?\s*=\s*)?["']([^"']+)["']/);
-    if (kafkaSend || kafkaListen) {
-      const topic = ensure('topic', kafkaSend?.[1] ?? kafkaListen![1]);
-      addFinding(kafkaSend ? from : topic, kafkaSend ? topic : from, 'Kafka', file, line, 'HIGH');
+    for (const annotation of annotationEntries(content, /@(?:[\w.]+\.)?(?:HttpExchange|GetExchange|PostExchange|PutExchange|DeleteExchange)\s*\(([\s\S]*?)\)/g)) {
+      const url = annotation.args.match(/["'](https?:\/\/[^"']+)["']/)?.[1];
+      if (!url) continue;
+      const host = httpHost(url);
+      const target = host ? externalOrService(host, owner.repository) : undefined;
+      if (target) add(owner.id, target, 'HTTP', file, annotation.line, 'HIGH', `HTTP:${owner.id}:${target}`);
     }
-    if (rabbitSend || rabbitListen) {
-      const topic = ensure('topic', rabbitSend?.[2] ?? rabbitListen![1]);
-      addFinding(rabbitSend ? from : topic, rabbitSend ? topic : from, 'RabbitMQ', file, line, 'HIGH');
+
+    const kafkaVariables = new Set([...content.matchAll(/KafkaTemplate(?:\s*<[^;()]+>)?\s+(\w+)/g)].map((match) => match[1]));
+    const rabbitVariables = new Set([...content.matchAll(/RabbitTemplate\s+(\w+)/g)].map((match) => match[1]));
+    for (const line of codeLines) {
+      const kafkaSend = line.text.match(/\b(\w+)\s*\.\s*send\s*\(\s*["']([^"']+)["']/);
+      if (kafkaSend && kafkaVariables.has(kafkaSend[1])) {
+        const topicName = kafkaSend[2];
+        const topic = ensure('topic', topicName, `topic:Kafka:${topicName}`, { repository: owner.repository, broker: 'Kafka' });
+        add(owner.id, topic, 'Kafka', file, line.line, 'HIGH', `Kafka:${owner.id}:${topic}`);
+      }
+      const rabbitSend = line.text.match(/\b(\w+)\s*\.\s*convertAndSend\s*\(\s*["'][^"']+["']\s*,\s*["']([^"']+)["']/);
+      if (rabbitSend && rabbitVariables.has(rabbitSend[1])) {
+        const queue = rabbitSend[2];
+        const topic = ensure('topic', queue, `topic:RabbitMQ:${queue}`, { repository: owner.repository, broker: 'RabbitMQ' });
+        add(owner.id, topic, 'RabbitMQ', file, line.line, 'HIGH', `RabbitMQ:${owner.id}:${topic}`);
+      }
     }
-    const db = code.match(/jdbc:postgres(?:ql)?:\/\/([^:/?]+)/i);
-    if (db) addFinding(from, ensure('database', 'postgresql'), 'PostgreSQL', file, line, 'MEDIUM');
-    const redis = code.match(/redis:\/\/([^:/?]+)/i);
-    if (redis) addFinding(from, ensure('cache', 'redis'), 'Redis', file, line, 'MEDIUM');
+    for (const annotation of annotationEntries(content, /@(?:[\w.]+\.)?KafkaListener\s*\(([\s\S]*?)\)/g)) {
+      const name = annotation.args.match(/\b(?:topics?|value)\s*=\s*["']([^"']+)["']/)?.[1];
+      if (!name) continue;
+      const topic = ensure('topic', name, `topic:Kafka:${name}`, { repository: owner.repository, broker: 'Kafka' });
+      add(topic, owner.id, 'Kafka', file, annotation.line, 'HIGH', `Kafka:${topic}:${owner.id}`);
+    }
+    for (const annotation of annotationEntries(content, /@(?:[\w.]+\.)?RabbitListener\s*\(([\s\S]*?)\)/g)) {
+      const name = annotation.args.match(/\b(?:queues?|value)\s*=\s*["']([^"']+)["']/)?.[1];
+      if (!name) continue;
+      const topic = ensure('topic', name, `topic:RabbitMQ:${name}`, { repository: owner.repository, broker: 'RabbitMQ' });
+      add(topic, owner.id, 'RabbitMQ', file, annotation.line, 'HIGH', `RabbitMQ:${topic}:${owner.id}`);
+    }
   }
-  for (const finding of findings) edges.push({
-    id: `edge:${slug(finding.from)}:${slug(finding.to)}:${slug(finding.protocol)}`,
-    source: finding.from, target: finding.to, protocol: finding.protocol, evidence: [finding.evidence],
-  });
-  const deduped = new Map<string, AtlasEdge>();
-  for (const edge of edges) {
-    const prior = deduped.get(edge.id);
-    if (prior) prior.evidence.push(...edge.evidence);
-    else deduped.set(edge.id, edge);
+
+  for (const [module, values] of propsByModule) {
+    const service = serviceModules.get(module);
+    if (!service) continue;
+    const seen = new Set<string>();
+    for (const { file, value } of values) {
+      let protocol: 'PostgreSQL' | 'Redis' | undefined;
+      let endpoint: { host: string; port: string } | undefined;
+      if (/^spring\.datasource\.(?:url|hikari\.jdbc-url|hikari\.jdbcUrl)$/i.test(value.key) && /^jdbc:postgres(?:ql)?:\/\//i.test(value.value)) {
+        protocol = 'PostgreSQL'; endpoint = hostPort(value.value, protocol);
+      } else if (/^spring\.(?:data\.redis|redis)\.url$/i.test(value.key)) {
+        protocol = 'Redis'; endpoint = hostPort(value.value, protocol);
+      }
+      if (protocol && endpoint) {
+        const target = infra(protocol === 'PostgreSQL' ? 'database' : 'cache', endpoint.host, endpoint.port, service.repository);
+        const edgeKey = `${protocol}:${service.id}:${target}`;
+        if (!seen.has(edgeKey)) add(service.id, target, protocol, file, value.line, 'MEDIUM', edgeKey);
+        seen.add(edgeKey);
+        continue;
+      }
+      const redisHostKey = /^spring\.(?:data\.redis|redis)\.host$/i.test(value.key);
+      if (redisHostKey && /^[a-zA-Z0-9.-]{1,253}$/.test(value.value)) {
+        const port = values.find((candidate) => candidate.value.key.toLowerCase() === value.key.replace(/host$/i, 'port').toLowerCase())?.value.value ?? '6379';
+        const target = infra('cache', value.value.toLowerCase(), /^[0-9]{1,5}$/.test(port) ? port : '6379', service.repository);
+        const edgeKey = `Redis:${service.id}:${target}`;
+        if (!seen.has(edgeKey)) add(service.id, target, 'Redis', file, value.line, 'MEDIUM', edgeKey);
+        seen.add(edgeKey);
+      }
+    }
   }
-  const ordered = [...nodes.values()].sort((a, b) => a.id.localeCompare(b.id));
-  ordered.forEach((node, index) => { node.position = { x: (index % 4) * 240, y: Math.floor(index / 4) * 140 }; });
-  const graph = { version: 1 as const, nodes: ordered, edges: [...deduped.values()].sort((a, b) => a.id.localeCompare(b.id)) };
-  return validateGraph(graph);
+
+  for (const file of files.filter((entry) => /(?:^|\/)(?:compose|docker-compose)\.ya?ml$/i.test(entry.path))) {
+    let inServices = false;
+    let current: { name: string; indent: number; image?: string; line: number } | undefined;
+    const services: Array<{ name: string; image?: string; line: number }> = [];
+    for (const { line, text: rawText } of rawLines(file)) {
+      const text = rawText.trimEnd();
+      if (!text.trim()) continue;
+      const indent = text.length - text.trimStart().length;
+      if (indent === 0 && text.trim() === 'services:') { inServices = true; current = undefined; continue; }
+      if (!inServices) continue;
+      if (indent === 0) { inServices = false; current = undefined; continue; }
+      const serviceDecl = text.match(/^\s{2}([A-Za-z0-9_-]+):\s*$/);
+      if (serviceDecl) {
+        if (current) services.push(current);
+        current = { name: serviceDecl[1], indent: 2, line };
+      } else if (current && indent === current.indent + 2) {
+        const image = text.match(/^\s+image:\s*([^\s#]+)/)?.[1];
+        if (image) current.image = image;
+      }
+    }
+    if (current) services.push(current);
+    for (const item of services) {
+      const image = item.image?.split(':')[0].toLowerCase().split('/').at(-1);
+      const type: NodeType = image?.includes('postgres') ? 'database' : image?.includes('redis') ? 'cache' : 'service';
+      ensure(type, item.name, `compose:${file.path}:${item.name}`, { repository: '.' });
+    }
+  }
+
+  for (const file of files.filter((entry) => /(?:deploy|k8s|kubernetes).*\.ya?ml$/i.test(entry.path))) {
+    for (const document of file.content.split(/^---\s*$/m)) {
+      const props = configValues({ ...file, content: document });
+      const kind = props.find((value) => value.key === 'kind')?.value;
+      const name = props.find((value) => value.key === 'metadata.name')?.value;
+      if (name && (kind === 'Service' || kind === 'Deployment' || kind === 'StatefulSet')) {
+        ensure('service', name, `kubernetes:${file.path}:${kind}:${name}`, { repository: '.' });
+      }
+      if (kind === 'Deployment' || kind === 'StatefulSet') {
+        for (const rawImage of kubernetesContainerImages(document)) {
+          const image = rawImage.split(':')[0].toLowerCase().split('/').at(-1) ?? '';
+          if (image.includes('postgres')) ensure('database', 'postgresql', `kubernetes-image:postgresql`, { repository: '.' });
+          if (image.includes('redis')) ensure('cache', 'redis', `kubernetes-image:redis`, { repository: '.' });
+        }
+      }
+    }
+  }
+
+  const edgeMap = new Map<string, AtlasEdge>();
+  for (const finding of findings) {
+    const id = `edge:${hash(finding.identity)}`;
+    const existing = edgeMap.get(id);
+    if (existing) existing.evidence.push(finding.evidence);
+    else edgeMap.set(id, { id, source: finding.from, target: finding.to, protocol: finding.protocol, evidence: [finding.evidence] });
+  }
+  const orderedNodes = [...nodes.values()].sort((a, b) => a.id.localeCompare(b.id));
+  orderedNodes.forEach((node, index) => { node.position = { x: (index % 4) * 240, y: Math.floor(index / 4) * 140 }; });
+  return validateGraph({ version: 1, nodes: orderedNodes, edges: [...edgeMap.values()].sort((a, b) => a.id.localeCompare(b.id)) });
 }

@@ -1,0 +1,13 @@
+name: unrelated-name-must-not-win
+spring:
+  application:
+    name: orders-api
+  datasource:
+    url: jdbc:postgresql://orders-db.internal:5432/orders?user=fixture&password=verySecret
+  data:
+    redis:
+      host: orders-cache.internal
+      port: 6380
+clients:
+  inventory:
+    url: http://inventory.internal:8080/api?token=must-not-leak

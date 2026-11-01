@@ -7,7 +7,7 @@ export interface WalkOptions { maxDepth?: number; maxFiles?: number; maxBytes?: 
 export interface ScannedFile { path: string; content: string; bytes: number }
 const SKIP_DIRS = new Set(['.git', 'node_modules', 'target', 'build', 'dist', 'out', 'coverage', '.next', '.gradle']);
 const SAFE_FILE = /\.(java|kt|xml|gradle|properties|ya?ml)$/i;
-const SENSITIVE_FILE = /(^|[._-])(secret|credential|password|passwd|token|private|id_rsa|\.env)([._-]|$)/i;
+const SENSITIVE_FILE = /(^|[._-])(secrets?|credentials?|passwords?|passwds?|tokens?|private|id_rsa|\.env)([._-]|$)/i;
 
 export async function walkFiles(root: string, options: WalkOptions = {}): Promise<ScannedFile[]> {
   const maxDepth = options.maxDepth ?? 12, maxFiles = options.maxFiles ?? 2_000;

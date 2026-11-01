@@ -1,0 +1,4 @@
+spring:
+ application:
+   name: [unterminated
+datasource.url jdbc:postgresql://should-not-create-edge
