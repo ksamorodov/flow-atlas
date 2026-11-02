@@ -6,7 +6,7 @@ import { isInsideRoot } from './roots.ts';
 export interface WalkOptions { maxDepth?: number; maxFiles?: number; maxBytes?: number; maxEntries?: number; maxMillis?: number }
 export interface ScannedFile { path: string; content: string; bytes: number }
 const SKIP_DIRS = new Set(['.git', 'node_modules', 'target', 'build', 'dist', 'out', 'coverage', '.next', '.gradle']);
-const SAFE_FILE = /\.(java|kt|xml|gradle|properties|ya?ml)$/i;
+const SAFE_FILE = /\.(java|kt|xml|gradle(?:\.kts)?|properties|ya?ml)$/i;
 const SENSITIVE_FILE = /(^|[._-])(secrets?|credentials?|passwords?|passwds?|tokens?|private|id_rsa|\.env)([._-]|$)/i;
 
 export async function walkFiles(root: string, options: WalkOptions = {}): Promise<ScannedFile[]> {
@@ -43,10 +43,19 @@ export async function walkFiles(root: string, options: WalkOptions = {}): Promis
       try {
         const opened = await handle.stat();
         if (!opened.isFile() || opened.ino !== stat.ino || opened.dev !== stat.dev) continue;
-        totalBytes += opened.size;
-        if (totalBytes > maxBytes) throw new RangeError('Scan byte limit exceeded');
-        const content = await handle.readFile({ encoding: 'utf8' });
-        files.push({ path: relative(canonicalRoot, canonical).split(sep).join('/'), content, bytes: opened.size });
+        const allowance = maxBytes - totalBytes;
+        const chunks: Buffer[] = [];
+        let bytes = 0;
+        while (true) {
+          const buffer = Buffer.alloc(Math.min(64 * 1024, allowance - bytes + 1));
+          const { bytesRead } = await handle.read(buffer, 0, buffer.length, bytes);
+          if (bytesRead === 0) break;
+          bytes += bytesRead;
+          if (bytes > allowance) throw new RangeError('Scan byte limit exceeded');
+          chunks.push(buffer.subarray(0, bytesRead));
+        }
+        totalBytes += bytes;
+        files.push({ path: relative(canonicalRoot, canonical).split(sep).join('/'), content: Buffer.concat(chunks).toString('utf8'), bytes });
       } finally { await handle.close(); }
     }
   }

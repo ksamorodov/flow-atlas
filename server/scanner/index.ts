@@ -56,7 +56,8 @@ function configValues(file: ScannedFile): FlatValue[] {
   const stack: Array<{ indent: number; key: string }> = [];
   for (const { line, text } of rawLines(file)) {
     const clean = text.replace(/\s+#.*$/, '').trimEnd();
-    if (!clean.trim() || clean.trim().startsWith('#') || clean.trim() === '---') { stack.length = 0; continue; }
+    if (!clean.trim() || clean.trim().startsWith('#')) continue;
+    if (clean.trim() === '---') { stack.length = 0; continue; }
     const indent = text.match(/^\s*/)?.[0].length ?? 0;
     const match = clean.trim().match(/^([A-Za-z0-9_.-]+):(?:\s*(.*))?$/);
     if (!match) continue;
@@ -82,10 +83,11 @@ function hostPort(raw: string, protocol: 'PostgreSQL' | 'Redis'): { host: string
     return { host: url.hostname.toLowerCase(), port: url.port || (protocol === 'PostgreSQL' ? '5432' : '6379') };
   } catch { return undefined; }
 }
-function httpHost(raw: string): string | undefined {
+function httpEndpoint(raw: string): { host: string; port: string } | undefined {
   try {
     const url = new URL(raw);
-    return (url.protocol === 'http:' || url.protocol === 'https:') && url.hostname ? url.hostname.toLowerCase() : undefined;
+    if ((url.protocol !== 'http:' && url.protocol !== 'https:') || !url.hostname) return undefined;
+    return { host: url.hostname.toLowerCase(), port: url.port || (url.protocol === 'https:' ? '443' : '80') };
   } catch { return undefined; }
 }
 function annotationEntries(content: string, pattern: RegExp): Array<{ line: number; args: string }> {
@@ -150,15 +152,15 @@ export async function discover(rootId: string, options: DiscoverOptions = {}): P
   };
   for (const service of serviceModules.values()) ensure('service', service.name, `source-module:${service.repository}`, { repository: service.repository });
   const ownerOf = (file: ScannedFile): ModuleInfo | undefined => serviceModules.get(moduleFor(file.path));
-  const externalOrService = (raw: string, repository: string): string | undefined => {
+  const externalOrService = (raw: string, repository: string, port?: string): string | undefined => {
     const normalized = raw.toLowerCase().replace(/\.$/, '');
     for (const service of serviceModules.values()) {
       const moduleName = basename(service.directory).toLowerCase();
       const appName = service.name.toLowerCase();
-      if (normalized === moduleName || normalized === appName || normalized.startsWith(`${moduleName}.`) || normalized.startsWith(`${appName}.`)) return service.id;
+      if (normalized === moduleName || normalized === appName) return service.id;
     }
     if (!/^[a-zA-Z0-9.-]{1,253}$/.test(raw)) return undefined;
-    return ensure('external', raw.toLowerCase(), `external:${raw.toLowerCase()}`, { repository });
+    return ensure('external', raw.toLowerCase(), `external:${raw.toLowerCase()}:${port ?? ''}`, { repository, ...(port ? { port } : {}) });
   };
   const add = (from: string, to: string, protocol: string, file: ScannedFile, line: number, confidence: Evidence['confidence'], identity: string): void => {
     findings.push({ from, to, protocol, identity, evidence: { path: file.path, line, protocol, confidence } });
@@ -178,8 +180,8 @@ export async function discover(rootId: string, options: DiscoverOptions = {}): P
       const directUrl = text.match(/(?:getForObject|postForObject|exchange|\.uri)\s*\([^)]*["'](https?:\/\/[^"']+)/)?.[1];
       const webClientUrl = text.match(/(?:\.baseUrl|WebClient\.create)\s*\(\s*["'](https?:\/\/[^"']+)/)?.[1];
       if (directUrl || webClientUrl) {
-        const host = httpHost(directUrl ?? webClientUrl ?? '');
-        const target = host ? externalOrService(host, owner.repository) : undefined;
+        const endpoint = httpEndpoint(directUrl ?? webClientUrl ?? '');
+        const target = endpoint ? externalOrService(endpoint.host, owner.repository, endpoint.port) : undefined;
         if (target) add(owner.id, target, 'HTTP', file, line.line, 'HIGH', `HTTP:${owner.id}:${target}`);
       }
     }
@@ -188,15 +190,16 @@ export async function discover(rootId: string, options: DiscoverOptions = {}): P
       const url = annotation.args.match(/\burl\s*=\s*["']([^"']+)["']/)?.[1];
       const placeholder = url?.match(/^\$\{(clients\.[A-Za-z0-9_-]+\.url)\}$/)?.[1];
       const clientValue = (propsByModule.get(moduleFor(file.path)) ?? []).find(({ value }) => value.key === placeholder)?.value.value;
-      const alias = targetName ?? (clientValue && httpHost(clientValue) ? placeholder?.split('.')[1] : undefined);
-      const target = alias ? externalOrService(alias, owner.repository) : undefined;
-      if (target) add(owner.id, target, 'HTTP', file, annotation.line, 'HIGH', `HTTP:${owner.id}:${target}`);
+      const endpoint = url && !placeholder ? httpEndpoint(url) : clientValue ? httpEndpoint(clientValue) : undefined;
+      const alias = url ? undefined : targetName;
+      const target = endpoint ? externalOrService(endpoint.host, owner.repository, endpoint.port) : !url && alias ? externalOrService(alias, owner.repository) : undefined;
+      if (target) add(owner.id, target, 'HTTP', file, annotation.line, endpoint && !placeholder ? 'HIGH' : 'HIGH', `HTTP:${owner.id}:${target}`);
     }
     for (const annotation of annotationEntries(content, /@(?:[\w.]+\.)?(?:HttpExchange|GetExchange|PostExchange|PutExchange|DeleteExchange)\s*\(([\s\S]*?)\)/g)) {
       const url = annotation.args.match(/["'](https?:\/\/[^"']+)["']/)?.[1];
       if (!url) continue;
-      const host = httpHost(url);
-      const target = host ? externalOrService(host, owner.repository) : undefined;
+      const endpoint = httpEndpoint(url);
+      const target = endpoint ? externalOrService(endpoint.host, owner.repository, endpoint.port) : undefined;
       if (target) add(owner.id, target, 'HTTP', file, annotation.line, 'HIGH', `HTTP:${owner.id}:${target}`);
     }
 
