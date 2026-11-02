@@ -30,7 +30,7 @@ npm test            # production build plus native Node test suite
 npm run test:e2e    # Playwright + Chromium browser checks
 ```
 
-The Playwright server reuses the local `npm start` server on port 4317 when available; the browser suite requires a built `dist/` first (included in `npm test`). Browser checks exercise synthetic content only. The human-review exercise and separate answer key are in [`docs/human-review-exercise.md`](docs/human-review-exercise.md) and [`docs/human-review-answers.md`](docs/human-review-answers.md). Fresh final-fix verification, including Semgrep/Gitleaks results and known parser limits, is recorded in `.superpowers/sdd/2026-11-02-flow-atlas-mvp/final-fix-report.md`. Alibaba review integration and GitHub CLI (`gh`) were unavailable; no Alibaba review occurred.
+The Playwright server reuses the local `npm start` server on port 4317 when available; the browser suite requires a built `dist/` first (included in `npm test`). Browser checks exercise synthetic content only. The human-review exercise and separate answer key are in [`docs/human-review-exercise.md`](docs/human-review-exercise.md) and [`docs/human-review-answers.md`](docs/human-review-answers.md). The final release commands, scoped review outcomes, and residual limitations are summarized in [`docs/verification-report.md`](docs/verification-report.md); scan detail is linked there. Alibaba review integration was unavailable; no Alibaba review occurred.
 
 ## Layout
 
