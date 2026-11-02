@@ -1,18 +1,46 @@
+import { mkdirSync } from 'node:fs';
+
 export async function runAtlasChecks(page) {
   const check = async (condition, message) => { if (!condition) throw new Error(`Flow Atlas browser check failed: ${message}`); };
+  const browserErrors = [];
+  page.on('pageerror', (error) => browserErrors.push(error.message));
+  page.on('console', (message) => { if (message.type() === 'error') browserErrors.push(message.text()); });
   await page.goto('http://127.0.0.1:4317/');
   await page.getByTestId('graph-canvas').waitFor();
+  await page.locator('.react-flow__edge').first().waitFor();
   await check(await page.locator('[data-node-id]').count() === 5, 'default E-commerce preset renders');
   await page.getByRole('button', { name: 'Event-driven' }).click();
   await check(await page.locator('[data-node-id]').count() === 5, 'Event-driven preset loads');
   await page.getByRole('button', { name: 'E-commerce' }).click();
+  mkdirSync('docs/screenshots', { recursive: true });
+  await page.screenshot({ path: 'docs/screenshots/manual-graph.png', fullPage: true });
+  const viewport = page.locator('.react-flow__viewport');
+  const initialViewport = await viewport.getAttribute('style');
+  await page.locator('[data-action="zoom-in"]').click();
+  await page.waitForFunction((previous) => document.querySelector('.react-flow__viewport')?.getAttribute('style') !== previous, initialViewport);
+  await check(await viewport.getAttribute('style') !== initialViewport, 'zoom control changes the viewport');
+  await page.locator('[data-action="fit"]').click();
+  const nodeWrapper = page.locator('.react-flow__node').filter({ has: page.locator('[data-node-id="orders"]') }).first();
+  const originalPosition = await nodeWrapper.getAttribute('style');
+  await nodeWrapper.dragTo(nodeWrapper, { targetPosition: { x: 32, y: 24 } });
+  await check(await nodeWrapper.getAttribute('style') !== originalPosition, 'node drag changes its canvas position');
+  const canvas = page.locator('.react-flow__pane');
+  const beforePan = await viewport.getAttribute('style');
+  await canvas.dragTo(canvas, { targetPosition: { x: 140, y: 120 } });
+  await check(await viewport.getAttribute('style') !== beforePan, 'background drag pans the graph');
   page.once('dialog', (dialog) => dialog.accept('service'));
   await page.getByTestId('add-node').click();
   await check(await page.locator('[data-node-id]').count() === 6, 'manual node add works');
   await page.getByTestId('connect-mode').click();
   await page.getByTestId('connect-source').selectOption('web');
-  await page.getByTestId('connect-target').selectOption('orders');
+  const initialEdgeCount = await page.locator('.react-flow__edge').count();
+  await page.getByTestId('connect-target').selectOption('web');
   await page.getByTestId('connect-protocol').selectOption('https');
+  await page.getByRole('button', { name: 'Create directed edge' }).click();
+  await check((await page.locator('#toast').textContent())?.includes('different nodes'), 'invalid same-node connect gives safe feedback');
+  await check(await page.locator('.react-flow__edge').count() === initialEdgeCount, 'invalid same-node connect leaves edges unchanged');
+  await check(browserErrors.length === 0, `invalid connect causes no page error: ${browserErrors.join(' | ')}`);
+  await page.getByTestId('connect-target').selectOption('orders');
   await page.getByRole('button', { name: 'Create directed edge' }).click();
   await page.locator('[data-edge-id]').nth(4).waitFor();
   await check(await page.locator('[data-edge-id]').count() === 5, 'directed connection is added');
@@ -34,16 +62,57 @@ export async function runAtlasChecks(page) {
   await page.getByTestId('fail-node').click();
   await check((await page.getByTestId('metric-health').textContent()) !== 'Healthy', 'failure affects live health');
   await page.getByTestId('recover-node').click();
-  await page.getByTestId('pause-simulation').click();
-  await check((await page.getByTestId('pause-simulation').textContent()).includes('Resume'), 'simulation pauses');
+  await check((await page.getByTestId('metric-health').textContent()) === 'Healthy', 'recovery restores healthy metrics');
   await page.getByTestId('intensity').fill('8');
   await check((await page.locator('#intensity-label').textContent()).includes('8'), 'intensity control updates');
+  await page.waitForFunction(() => [...document.querySelectorAll('.react-flow__edge.animated .react-flow__edge-path')]
+    .some((path) => getComputedStyle(path).animationName !== 'none'));
+  await check(await page.locator('.react-flow__edge.animated').count() > 0, 'active traffic uses an animated graph edge');
+  await page.getByTestId('pause-simulation').click();
+  await check((await page.getByTestId('pause-simulation').textContent()).includes('Resume'), 'simulation pauses');
+  await page.waitForFunction(() => document.querySelectorAll('.react-flow__edge.animated').length === 0);
+  await check(await page.locator('.react-flow__edge.animated').count() === 0, 'pause stops traffic animation');
+  await page.getByTestId('retry-toggle').click();
+  await check((await page.getByTestId('retry-toggle').textContent()).includes('Retries off'), 'retry control disables retries');
+  await page.getByTestId('retry-toggle').click();
   await page.getByTestId('open-discovery').click();
   await page.getByTestId('run-discovery').click();
   await page.getByText('Architecture discovered').waitFor({ timeout: 10000 });
   await check(await page.locator('[data-node-id]').count() > 0, 'allowlisted discovery replaces graph');
+  await page.screenshot({ path: 'docs/screenshots/discovered-graph.png', fullPage: true });
+  const repoChipForReplacement = page.locator('[data-action="filter"][data-category="repositories"]').first();
+  if (await repoChipForReplacement.count()) {
+    await repoChipForReplacement.click();
+    await page.getByRole('button', { name: 'E-commerce' }).click();
+    await check(await page.locator('[data-node-id]').count() === 5, 'loading a preset clears stale discovery repository filters');
+    await page.getByTestId('open-discovery').click();
+    await page.getByTestId('run-discovery').click();
+    await page.getByText('Architecture discovered').waitFor({ timeout: 10000 });
+  }
+  const httpFilter = page.locator('[data-action="filter"][data-category="protocols"][data-value="HTTP"]');
+  const edgeCount = await page.locator('[data-edge-id]').count();
+  if (await httpFilter.count()) {
+    await httpFilter.click();
+    await check(await page.locator('[data-edge-id]').count() < edgeCount, 'protocol filter narrows visible edges');
+    await httpFilter.click();
+  }
+  const confidenceFilter = page.locator('[data-action="filter"][data-category="confidences"][data-value="MEDIUM"]');
+  if (await confidenceFilter.count()) {
+    const beforeConfidence = await page.locator('[data-edge-id]').count();
+    await confidenceFilter.click();
+    await check(await page.locator('[data-edge-id]').count() < beforeConfidence, 'confidence filter narrows visible edges');
+    await confidenceFilter.click();
+  }
+  const repositoryFilter = page.locator('[data-action="filter"][data-category="repositories"]').first();
+  if (await repositoryFilter.count()) {
+    const beforeRepository = await page.locator('[data-node-id]').count();
+    await repositoryFilter.click();
+    await check(await page.locator('[data-node-id]').count() < beforeRepository, 'repository filter narrows visible nodes');
+    await repositoryFilter.click();
+  }
   await page.locator('.edge-protocol').first().click();
   await check(await page.locator('[data-testid="evidence-item"]').count() > 0, 'discovered edge exposes evidence');
+  await check((await page.locator('[data-testid="evidence-item"]').first().textContent()).match(/:\d+/), 'source evidence includes its file and line');
   const download = page.waitForEvent('download');
   await page.getByTestId('export-graph').click();
   await check((await download).suggestedFilename() === 'flow-atlas-graph.json', 'JSON export downloads');
@@ -67,4 +136,5 @@ export async function runAtlasChecks(page) {
   await page.getByRole('button', { name: 'Validate and import' }).click();
   await check(await page.locator('[data-node-id="imported"]').count() === 1, 'paused valid import loads its node');
   await check(Number.parseInt(await page.getByTestId('metric-rps').innerText(), 10) > 0, 'paused valid import reconciles metrics to its graph');
+  await check(browserErrors.length === 0, `page and console errors: ${browserErrors.join(' | ')}`);
 }

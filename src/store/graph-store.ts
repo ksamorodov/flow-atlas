@@ -30,7 +30,7 @@ export function createGraphStore(initial: GraphDocument = createPreset('microser
     const current = state();
     const nodeIds = new Set(graph.nodes.map((node) => node.id));
     commit({ graph: validateGraph(graph), ...(resetSimulation ? { tick: 0,
-      simulation: { ...current.simulation, failedNodeIds: [] } } : { simulation: {
+      simulation: { ...current.simulation, failedNodeIds: [] }, filters: { protocols: [], confidences: [], repositories: [] } } : { simulation: {
         ...current.simulation, failedNodeIds: (current.simulation.failedNodeIds ?? []).filter((id) => nodeIds.has(id)),
       } }), selectedEdgeId: null,
       selectedNodeId: graph.nodes.some((node) => node.id === current.selectedNodeId) ? current.selectedNodeId : graph.nodes[0]?.id ?? null });

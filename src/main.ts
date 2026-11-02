@@ -147,7 +147,23 @@ function openConnectDialog() {
   const nodes = store.getState().graph.nodes; if (nodes.length < 2) { showToast('Add at least two nodes to connect', true); return; }
   const back = document.createElement('div'); back.className = 'modal-back'; back.dataset.testid = 'connect-modal'; const modal = document.createElement('section'); modal.className = 'modal'; const title = document.createElement('h2'); title.textContent = 'Create directed dependency'; const row = document.createElement('div'); row.className = 'row'; const source = document.createElement('select'), target = document.createElement('select'); source.dataset.testid = 'connect-source'; target.dataset.testid = 'connect-target'; for (const node of nodes) for (const select of [source, target]) { const option = document.createElement('option'); option.value = node.id; option.textContent = safeText(node.data.label, node.id); select.append(option); } if (nodes[1]) target.value = nodes[1].id; const protocol = document.createElement('select'); protocol.dataset.testid = 'connect-protocol'; for (const item of ['http', 'https', 'postgres', 'redis', 'kafka', 'rabbitmq', 'manual']) { const option = document.createElement('option'); option.value = item; option.textContent = item; protocol.append(option); } const actions = document.createElement('div'); actions.className = 'modal-actions'; const cancel = button('cancel-connect', 'Cancel'), apply = button('apply-connect', 'Create directed edge', 'toolbar primary'); actions.append(cancel, apply); const fields = document.createElement('div'); fields.className = 'row'; fields.append(source, target, protocol); modal.append(title, fields, actions); back.append(modal); appRoot.append(back); connectMode = false; appRoot.querySelector('[data-action="connect"]')!.classList.remove('primary'); appRoot.querySelector('[data-action="connect"]')!.textContent = '↗ Connect';
 }
-appRoot.addEventListener('click', (event) => { const target = (event.target as Element).closest<HTMLElement>('[data-action]'); if (!target) return; if (target.dataset.action === 'cancel-connect') appRoot.querySelector('[data-testid="connect-modal"]')?.remove(); if (target.dataset.action === 'apply-connect') { const source = appRoot.querySelector<HTMLSelectElement>('[data-testid="connect-source"]')!, dest = appRoot.querySelector<HTMLSelectElement>('[data-testid="connect-target"]')!, protocol = appRoot.querySelector<HTMLSelectElement>('[data-testid="connect-protocol"]')!; store.connect(source.value, dest.value, protocol.value); appRoot.querySelector('[data-testid="connect-modal"]')?.remove(); showToast('Directed dependency created'); } });
+appRoot.addEventListener('click', (event) => {
+  const target = (event.target as Element).closest<HTMLElement>('[data-action]');
+  if (!target) return;
+  if (target.dataset.action === 'cancel-connect') appRoot.querySelector('[data-testid="connect-modal"]')?.remove();
+  if (target.dataset.action === 'apply-connect') {
+    const source = appRoot.querySelector<HTMLSelectElement>('[data-testid="connect-source"]')!;
+    const dest = appRoot.querySelector<HTMLSelectElement>('[data-testid="connect-target"]')!;
+    const protocol = appRoot.querySelector<HTMLSelectElement>('[data-testid="connect-protocol"]')!;
+    try {
+      store.connect(source.value, dest.value, protocol.value);
+      appRoot.querySelector('[data-testid="connect-modal"]')?.remove();
+      showToast('Directed dependency created');
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not create dependency', true);
+    }
+  }
+});
 appRoot.addEventListener('input', (event) => { const target = event.target as HTMLInputElement; if (target.dataset.testid === 'intensity') store.setSimulation({ intensity: Number(target.value) }); });
 appRoot.querySelector<HTMLSelectElement>('#root-select')!.addEventListener('change', (event) => { rootId = (event.target as HTMLSelectElement).value; });
 appRoot.querySelector<HTMLInputElement>('#import-file')!.addEventListener('change', async (event) => { const input = event.target as HTMLInputElement, file = input.files?.[0]; if (!file) return; try { if (file.size > 1_000_000) throw new Error('Import must be at most 1 MB'); store.importJson(await file.text()); showToast('Validated graph imported'); view.fit(); } catch (error) { showToast(error instanceof Error ? error.message : 'Invalid graph file', true); } finally { input.value = ''; } });
