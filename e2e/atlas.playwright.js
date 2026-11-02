@@ -79,7 +79,10 @@ export async function runAtlasChecks(page) {
   await page.getByTestId('run-discovery').click();
   await page.getByText('Architecture discovered').waitFor({ timeout: 10000 });
   await check(await page.locator('[data-node-id]').count() > 0, 'allowlisted discovery replaces graph');
-  await page.screenshot({ path: 'docs/screenshots/discovered-graph.png', fullPage: true });
+  const discoveredCards = await page.locator('.node-card').evaluateAll((cards) => cards.map((card) => ({
+    title: card.querySelector('.node-title')?.textContent?.trim(), id: card.getAttribute('data-node-id'),
+  })));
+  await check(discoveredCards.some(({ title, id }) => (title === 'orders' || title === 'catalog') && title !== id), 'discovered cards show readable service names instead of hashed IDs');
   const repoChipForReplacement = page.locator('[data-action="filter"][data-category="repositories"]').first();
   if (await repoChipForReplacement.count()) {
     await repoChipForReplacement.click();
@@ -113,6 +116,8 @@ export async function runAtlasChecks(page) {
   await page.locator('.edge-protocol').first().click();
   await check(await page.locator('[data-testid="evidence-item"]').count() > 0, 'discovered edge exposes evidence');
   await check((await page.locator('[data-testid="evidence-item"]').first().textContent()).match(/:\d+/), 'source evidence includes its file and line');
+  await check(await page.getByTestId('inspector-kind').textContent() === 'Dependency inspector', 'evidence screenshot shows a selected discovered edge');
+  await page.screenshot({ path: 'docs/screenshots/discovered-graph.png', fullPage: true });
   const download = page.waitForEvent('download');
   await page.getByTestId('export-graph').click();
   await check((await download).suggestedFilename() === 'flow-atlas-graph.json', 'JSON export downloads');

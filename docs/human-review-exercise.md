@@ -12,13 +12,21 @@ Read the cited final-code ranges and assess the behavior. The answer key is deli
 
 ## 2. HTTP and Feign endpoint identity
 
-**Section:** `server/scanner/index.ts:85–90,153–164,178–204` (sanitized HTTP endpoint parsing, service/external identity, call and annotation handling).
+**Section:** `server/scanner/index.ts:86–100,217–235` (sanitized HTTP endpoint parsing, annotation line attribution, Feign config resolution and evidence).
 
-**Intended behavior:** prefer explicit/resolvable Feign URLs; preserve port identity; map only exact known service hosts; avoid returning credentials, URL paths, fragments, queries, or unresolved placeholder aliases as confident external destinations.
+**Intended behavior:** preserve sanitized host/port identity; cite a literal Feign annotation at HIGH confidence and a resolved `clients.<alias>.url` config value at MEDIUM confidence with its config file and line; unresolved placeholders create no invented destination.
 
-**Possible-defect question:** Does the source distinguish a URL resolved from configuration from a literal code URL in confidence and evidence, while retaining the correct host/port identity?
+**Possible-defect question:** Do exact regressions assert confidence, evidence path/line, and host/port independently, without serializing URL credentials, path, query or fragment?
 
-## 3. Bounded file-descriptor reads
+## 3. RabbitMQ topology limits
+
+**Section:** `server/scanner/index.ts:103–136,247–280` (conservative call argument parsing, destination identities and listener queues).
+
+**Intended behavior:** `convertAndSend(exchange, routingKey, payload)` produces an exchange/routing-key destination, distinct from queue names. The two-argument literal overload represents a default-exchange routing destination; dynamic/unsupported expressions are omitted. The scanner does not infer exchange-to-queue bindings, including from equal strings or visible binding declarations.
+
+**Possible-defect question:** Does a matching routing-key/queue string fabricate producer-to-consumer reachability? What explicit binding semantics remain outside the scanner's supported subset?
+
+## 4. Bounded file-descriptor reads
 
 **Section:** `server/security/walk.ts:39–65` (safe-file gate, canonical containment, opened-file verification, bounded descriptor reads).
 

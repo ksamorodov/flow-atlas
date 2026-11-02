@@ -48,7 +48,7 @@ function FlowCanvas({ store, readMetrics, root }: { store: GraphStore; readMetri
   const metrics = readMetrics();
   const nodes = useMemo<Node<CardData, 'service'>[]>(() => graph.nodes.map((item: AtlasNode) => ({
     id: item.id, type: 'service', position: item.position,
-    data: { type: item.type, label: typeof item.data.label === 'string' ? item.data.label : item.id,
+    data: { type: item.type, label: typeof item.data.label === 'string' ? item.data.label : typeof item.data.name === 'string' ? item.data.name : item.id,
       repository: typeof item.data.repository === 'string' ? item.data.repository : 'manual',
       metric: metrics.find((metric) => metric.id === item.id), selected: state.selectedNodeId === item.id },
   })), [graph.nodes, metrics, state.selectedNodeId]);

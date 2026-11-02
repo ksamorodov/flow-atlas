@@ -42,15 +42,20 @@ test('attributes findings only to nested Spring modules and distinguishes servic
   assert.equal(graph.nodes.some((node) => node.type === 'service' && node.data.name === 'random-not-an-application-name'), false);
   assert.equal(graph.nodes.some((node) => node.type === 'service' && node.data.name === 'missing.client.url'), false);
   assert.equal(graph.nodes.some((node) => node.data.name === 'phantom-compose-name' || node.data.name === 'phantom-env-name' || node.data.name === 'inventory-container'), false);
-  const brokers = graph.nodes.filter((node) => node.type === 'topic' && node.data.name === 'orders');
-  assert.deepEqual(brokers.map((node) => node.data.broker).sort(), ['Kafka', 'RabbitMQ']);
-  for (const broker of ['Kafka', 'RabbitMQ']) {
-    const topic = brokers.find((node) => node.data.broker === broker)!;
-    const ordersService = services.find((node) => node.data.name === 'orders-api')!;
-    const inventoryService = services.find((node) => node.data.name === 'inventory-api')!;
-    assert.ok(graph.edges.some((edge) => edge.protocol === broker && edge.source === ordersService.id && edge.target === topic.id));
-    assert.ok(graph.edges.some((edge) => edge.protocol === broker && edge.source === topic.id && edge.target === inventoryService.id));
-  }
+  const kafkaTopic = graph.nodes.find((node) => node.type === 'topic' && node.data.broker === 'Kafka' && node.data.name === 'orders');
+  assert.ok(kafkaTopic);
+  const ordersService = services.find((node) => node.data.name === 'orders-api')!;
+  const inventoryService = services.find((node) => node.data.name === 'inventory-api')!;
+  assert.ok(graph.edges.some((edge) => edge.protocol === 'Kafka' && edge.source === ordersService.id && edge.target === kafkaTopic.id));
+  assert.ok(graph.edges.some((edge) => edge.protocol === 'Kafka' && edge.source === kafkaTopic.id && edge.target === inventoryService.id));
+  const rabbitRoute = graph.nodes.find((node) => node.type === 'topic' && node.data.broker === 'RabbitMQ' && node.data.subtype === 'exchange-routing-key');
+  const rabbitQueue = graph.nodes.find((node) => node.type === 'topic' && node.data.broker === 'RabbitMQ' && node.data.subtype === 'queue' && node.data.name === 'orders');
+  assert.ok(rabbitRoute);
+  assert.ok(rabbitQueue);
+  assert.notEqual(rabbitRoute.id, rabbitQueue.id);
+  assert.ok(graph.edges.some((edge) => edge.protocol === 'RabbitMQ' && edge.source === ordersService.id && edge.target === rabbitRoute.id));
+  assert.ok(graph.edges.some((edge) => edge.protocol === 'RabbitMQ' && edge.source === rabbitQueue.id && edge.target === inventoryService.id));
+  assert.equal(graph.edges.some((edge) => edge.protocol === 'RabbitMQ' && edge.source === ordersService.id && edge.target === inventoryService.id), false);
   assert.equal(graph.nodes.some((node) => node.data.name === 'not-a-kafka-topic' || node.data.name === 'ghost'), false);
   const dbs = graph.nodes.filter((node) => node.type === 'database');
   assert.deepEqual(dbs.map((node) => node.data.name).sort(), ['db', 'inventory-db.internal', 'orders-db.internal']);
@@ -125,5 +130,78 @@ test('uses sanitized Feign endpoint identities and exact service matching with e
     assert.equal(JSON.stringify(graph).includes('secret'), false);
     assert.equal(JSON.stringify(graph).includes('/private'), false);
     assert.equal(JSON.stringify(graph).includes('hidden'), false);
+    const literalTarget = external.find((node) => node.data.name === 'api.example' && node.data.port === '8443');
+    const configuredTarget = external.find((node) => node.data.name === 'resolved.example');
+    assert.ok(literalTarget);
+    assert.ok(configuredTarget);
+    const literalEvidence = graph.edges.find((edge) => edge.protocol === 'HTTP' && edge.target === literalTarget.id)?.evidence;
+    const configuredEvidence = graph.edges.find((edge) => edge.protocol === 'HTTP' && edge.target === configuredTarget.id)?.evidence;
+    assert.deepEqual(literalEvidence?.map(({ path, line, confidence }) => ({ path, line, confidence })), [
+      { path: 'orders/src/main/java/example/Clients.java', line: 1, confidence: 'HIGH' },
+    ]);
+    assert.deepEqual(configuredEvidence?.map(({ path, line, confidence }) => ({ path, line, confidence })), [
+      { path: 'orders/src/main/resources/application.yml', line: 3, confidence: 'MEDIUM' },
+    ]);
+  });
+});
+
+test('keeps RabbitMQ exchange destinations distinct from queues and skips unsupported overloads and bindings', async () => {
+  await withSyntheticRoot(async (root) => {
+    await mkdir(join(root, 'orders/src/main/java/example'), { recursive: true });
+    await mkdir(join(root, 'inventory/src/main/java/example'), { recursive: true });
+    await writeFile(join(root, 'orders/build.gradle'), 'plugins {}\n');
+    await writeFile(join(root, 'inventory/build.gradle'), 'plugins {}\n');
+    await writeFile(join(root, 'orders/src/main/java/example/Orders.java'), [
+      '@SpringBootApplication class Orders {}',
+      'class Publisher {',
+      '  void send(org.springframework.amqp.rabbit.core.RabbitTemplate rabbit) {',
+      '    rabbit.convertAndSend("events", "shared", "body");',
+      '    rabbit.convertAndSend("events", "bound", "body");',
+      '    rabbit.convertAndSend("default-queue", "body");',
+      '  }',
+      '}',
+    ].join('\n'));
+    await writeFile(join(root, 'inventory/src/main/java/example/Inventory.java'), [
+      '@SpringBootApplication class Inventory {}',
+      'class Listeners {',
+      '  @RabbitListener(queues="shared") void receive(String body) {}',
+      '  @RabbitListener(queues="bound") void bound(String body) {}',
+      '  @RabbitListener(queues="default-queue") void defaultExchange(String body) {}',
+      '}',
+    ].join('\n'));
+    await writeFile(join(root, 'inventory/src/main/java/example/Bindings.java'), [
+      '@org.springframework.amqp.rabbit.annotation.Configuration',
+      'class Bindings {',
+      '  @org.springframework.amqp.rabbit.annotation.Bean',
+      '  org.springframework.amqp.core.Binding binding() { return org.springframework.amqp.core.BindingBuilder.bind(queue()).to(new org.springframework.amqp.core.TopicExchange("events")).with("bound"); }',
+      '}',
+    ].join('\n'));
+    const graph = await discover('synthetic', { roots: [{ id: 'synthetic', label: 'Synthetic', path: root }] });
+    const rabbitNodes = graph.nodes.filter((node) => node.type === 'topic' && node.data.broker === 'RabbitMQ');
+    const exchangeRoute = rabbitNodes.find((node) => node.data.subtype === 'exchange-routing-key' && node.data.routingKey === 'shared');
+    const sharedQueue = rabbitNodes.find((node) => node.data.subtype === 'queue' && node.data.name === 'shared');
+    const boundQueue = rabbitNodes.find((node) => node.data.subtype === 'queue' && node.data.name === 'bound');
+    assert.ok(exchangeRoute);
+    assert.equal(exchangeRoute.data.exchange, 'events');
+    assert.equal(exchangeRoute.data.routingKey, 'shared');
+    assert.ok(sharedQueue);
+    assert.ok(boundQueue);
+    assert.notEqual(exchangeRoute.id, sharedQueue.id);
+    const orders = graph.nodes.find((node) => node.type === 'service' && node.data.name === 'orders');
+    const inventory = graph.nodes.find((node) => node.type === 'service' && node.data.name === 'inventory');
+    assert.ok(orders);
+    assert.ok(inventory);
+    assert.ok(graph.edges.some((edge) => edge.protocol === 'RabbitMQ' && edge.source === orders.id && edge.target === exchangeRoute.id));
+    assert.ok(graph.edges.some((edge) => edge.protocol === 'RabbitMQ' && edge.source === sharedQueue.id && edge.target === inventory.id));
+    assert.equal(graph.edges.some((edge) => edge.protocol === 'RabbitMQ' && edge.source === orders.id && edge.target === inventory.id), false);
+    const defaultQueue = rabbitNodes.find((node) => node.data.subtype === 'queue' && node.data.name === 'default-queue');
+    assert.ok(defaultQueue);
+    assert.ok(graph.edges.some((edge) => edge.protocol === 'RabbitMQ' && edge.source === orders.id && edge.target === defaultQueue.id));
+    const boundRoute = rabbitNodes.find((node) => node.data.subtype === 'exchange-routing-key' && node.data.exchange === 'events' && node.data.routingKey === 'bound');
+    assert.ok(boundRoute);
+    assert.notEqual(boundRoute.id, boundQueue.id);
+    assert.ok(graph.edges.some((edge) => edge.protocol === 'RabbitMQ' && edge.source === orders.id && edge.target === boundRoute.id));
+    assert.ok(graph.edges.some((edge) => edge.protocol === 'RabbitMQ' && edge.source === boundQueue.id && edge.target === inventory.id));
+    assert.equal(graph.edges.some((edge) => edge.protocol === 'RabbitMQ' && edge.source === orders.id && edge.target === boundQueue.id), false);
   });
 });

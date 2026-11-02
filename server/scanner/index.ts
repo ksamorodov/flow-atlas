@@ -98,6 +98,35 @@ function annotationEntries(content: string, pattern: RegExp): Array<{ line: numb
   }
   return entries;
 }
+function javaStringLiteral(argument: string): string | undefined {
+  const trimmed = argument.trim();
+  const match = trimmed.match(/^"((?:\\.|[^"\\])*)"$/);
+  return match?.[1];
+}
+function callArguments(content: string, openingParen: number): string[] | undefined {
+  const args: string[] = [];
+  let start = openingParen + 1, depth = 0, quote = '', escaped = false;
+  for (let index = openingParen + 1; index < content.length; index += 1) {
+    const char = content[index];
+    if (escaped) { escaped = false; continue; }
+    if (char === '\\' && quote) { escaped = true; continue; }
+    if ((char === '"' || char === "'") && (!quote || quote === char)) { quote = quote ? '' : char; continue; }
+    if (quote) continue;
+    if (char === '(') { depth += 1; continue; }
+    if (char === ')') {
+      if (depth > 0) { depth -= 1; continue; }
+      const last = content.slice(start, index).trim();
+      if (last) args.push(last);
+      return args;
+    }
+    if (char === ',' && depth === 0) { args.push(content.slice(start, index).trim()); start = index + 1; }
+    if (char === '\n' && depth === 0) return undefined;
+  }
+  return undefined;
+}
+function safeRabbitName(value: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value) && !/secret|credential|password|token/i.test(value);
+}
 function kubernetesContainerImages(document: string): string[] {
   const images: string[] = [];
   let containersIndent = -1;
@@ -189,11 +218,14 @@ export async function discover(rootId: string, options: DiscoverOptions = {}): P
       const targetName = annotation.args.match(/\b(?:name|value)\s*=\s*["']([^"']+)["']/)?.[1];
       const url = annotation.args.match(/\burl\s*=\s*["']([^"']+)["']/)?.[1];
       const placeholder = url?.match(/^\$\{(clients\.[A-Za-z0-9_-]+\.url)\}$/)?.[1];
-      const clientValue = (propsByModule.get(moduleFor(file.path)) ?? []).find(({ value }) => value.key === placeholder)?.value.value;
-      const endpoint = url && !placeholder ? httpEndpoint(url) : clientValue ? httpEndpoint(clientValue) : undefined;
+      const configuredValue = placeholder ? (propsByModule.get(moduleFor(file.path)) ?? []).find(({ value }) => value.key === placeholder) : undefined;
+      const endpoint = url && !placeholder ? httpEndpoint(url) : configuredValue ? httpEndpoint(configuredValue.value.value) : undefined;
       const alias = url ? undefined : targetName;
       const target = endpoint ? externalOrService(endpoint.host, owner.repository, endpoint.port) : !url && alias ? externalOrService(alias, owner.repository) : undefined;
-      if (target) add(owner.id, target, 'HTTP', file, annotation.line, endpoint && !placeholder ? 'HIGH' : 'HIGH', `HTTP:${owner.id}:${target}`);
+      if (target) {
+        if (placeholder && configuredValue) add(owner.id, target, 'HTTP', configuredValue.file, configuredValue.value.line, 'MEDIUM', `HTTP:${owner.id}:${target}`);
+        else add(owner.id, target, 'HTTP', file, annotation.line, 'HIGH', `HTTP:${owner.id}:${target}`);
+      }
     }
     for (const annotation of annotationEntries(content, /@(?:[\w.]+\.)?(?:HttpExchange|GetExchange|PostExchange|PutExchange|DeleteExchange)\s*\(([\s\S]*?)\)/g)) {
       const url = annotation.args.match(/["'](https?:\/\/[^"']+)["']/)?.[1];
@@ -212,11 +244,26 @@ export async function discover(rootId: string, options: DiscoverOptions = {}): P
         const topic = ensure('topic', topicName, `topic:Kafka:${topicName}`, { repository: owner.repository, broker: 'Kafka' });
         add(owner.id, topic, 'Kafka', file, line.line, 'HIGH', `Kafka:${owner.id}:${topic}`);
       }
-      const rabbitSend = line.text.match(/\b(\w+)\s*\.\s*convertAndSend\s*\(\s*["'][^"']+["']\s*,\s*["']([^"']+)["']/);
-      if (rabbitSend && rabbitVariables.has(rabbitSend[1])) {
-        const queue = rabbitSend[2];
-        const topic = ensure('topic', queue, `topic:RabbitMQ:${queue}`, { repository: owner.repository, broker: 'RabbitMQ' });
-        add(owner.id, topic, 'RabbitMQ', file, line.line, 'HIGH', `RabbitMQ:${owner.id}:${topic}`);
+      for (const invocation of line.text.matchAll(/\b(\w+)\s*\.\s*convertAndSend\s*\(/g)) {
+        if (!rabbitVariables.has(invocation[1])) continue;
+        const openingParen = (invocation.index ?? 0) + invocation[0].lastIndexOf('(');
+        const args = callArguments(line.text, openingParen);
+        if (!args || (args.length !== 2 && args.length !== 3)) continue;
+        const first = javaStringLiteral(args[0]);
+        if (!first || !safeRabbitName(first)) continue;
+        if (args.length === 2) {
+          if (!args[1]) continue;
+          const queue = ensure('topic', first, `queue:RabbitMQ:${first}`, { repository: owner.repository, broker: 'RabbitMQ', subtype: 'queue' });
+          add(owner.id, queue, 'RabbitMQ', file, line.line, 'HIGH', `RabbitMQ:${owner.id}:${queue}`);
+          continue;
+        }
+        const routingKey = javaStringLiteral(args[1]);
+        if (!routingKey || !safeRabbitName(routingKey) || !args[2]) continue;
+        const destinationName = `${first} → ${routingKey}`;
+        const destination = ensure('topic', destinationName, `exchange-routing-key:RabbitMQ:${first}:${routingKey}`, {
+          repository: owner.repository, broker: 'RabbitMQ', subtype: 'exchange-routing-key', exchange: first, routingKey,
+        });
+        add(owner.id, destination, 'RabbitMQ', file, line.line, 'HIGH', `RabbitMQ:${owner.id}:${destination}`);
       }
     }
     for (const annotation of annotationEntries(content, /@(?:[\w.]+\.)?KafkaListener\s*\(([\s\S]*?)\)/g)) {
@@ -228,7 +275,8 @@ export async function discover(rootId: string, options: DiscoverOptions = {}): P
     for (const annotation of annotationEntries(content, /@(?:[\w.]+\.)?RabbitListener\s*\(([\s\S]*?)\)/g)) {
       const name = annotation.args.match(/\b(?:queues?|value)\s*=\s*["']([^"']+)["']/)?.[1];
       if (!name) continue;
-      const topic = ensure('topic', name, `topic:RabbitMQ:${name}`, { repository: owner.repository, broker: 'RabbitMQ' });
+      if (!safeRabbitName(name)) continue;
+      const topic = ensure('topic', name, `queue:RabbitMQ:${name}`, { repository: owner.repository, broker: 'RabbitMQ', subtype: 'queue' });
       add(topic, owner.id, 'RabbitMQ', file, annotation.line, 'HIGH', `RabbitMQ:${topic}:${owner.id}`);
     }
   }

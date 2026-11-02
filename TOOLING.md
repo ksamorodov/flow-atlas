@@ -17,7 +17,7 @@ Environment check performed 2026-11-02 for the Flow Atlas local MVP setup.
 
 - `gh`, `pnpm`, and standalone `playwright` commands are not installed/on PATH.
 - Alibaba/custom git-skill command candidates (`alibaba-git-skill`, `git-skill`) were not found.
-- The fresh Semgrep registry scan was blocked by a proxy tunnel error (`semgrep.dev`, HTTP 502); there is no fresh Semgrep result for the final changes.
+- An earlier Task 4 Semgrep registry request was blocked by a proxy tunnel error; that historical result was superseded by successful targeted production and fixture scans documented below.
 
 ## Network status
 
@@ -25,9 +25,15 @@ Environment check performed 2026-11-02 for the Flow Atlas local MVP setup.
 
 The initial setup did not install project dependencies. For Task 3, network access was restored and the project's pinned frontend/tooling dependencies were installed locally. Earlier network checks are historical and do not establish current endpoint availability.
 
-## Task 4 verification status
+## Task 4 historical verification
 
-The final Task 4 report is `.superpowers/sdd/2026-11-02-flow-atlas-mvp/task-4-report.md`. It records fresh `npm test`, typecheck, build, browser tests, Gitleaks, and diff-check results, as well as the Semgrep limitation. Do not treat older Semgrep artifacts as fresh results or infer findings that were not emitted by a scan.
+The Task 4 report is `.superpowers/sdd/2026-11-02-flow-atlas-mvp/task-4-report.md`; its semgrep limitation was resolved in the bounded final-fix wave below. Historical artifacts are not evidence for that wave.
+
+## Bounded final-fix wave (2026-11-02)
+
+The latest evidence is `.superpowers/sdd/2026-11-02-flow-atlas-mvp/final-fix-report.md` and `final-scan-evidence.md`. RabbitMQ exchange/routing destinations and listener queues have separate identities; binding inference is unsupported, and only literal simple overload arguments are recognized. Resolved Feign placeholders cite the config file/line with MEDIUM confidence; literal URLs cite annotation evidence with HIGH confidence. Cards and connect-dialog options prefer `data.label`, then `data.name`, then ID.
+
+Fresh targeted Semgrep checks passed: 74 production JavaScript/TypeScript rules across 28 targets, zero findings; the separate fixture-only Kubernetes scan produced three hardening findings in non-deployed synthetic fixtures and its JSON reports one parser error on the intentionally malformed YAML fixture. Fresh native tests, typecheck, build, browser tests, Gitleaks, and diff checks are recorded in the final-fix report. These are local checks only; Alibaba review did not occur.
 
 ## Task 3 frontend
 
