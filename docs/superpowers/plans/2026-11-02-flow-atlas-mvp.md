@@ -6,6 +6,8 @@
 
 **Architecture:** A same-origin Vite React/TypeScript client uses React Flow and Zustand with a versioned shared graph schema. A localhost-only Node API owns root allowlisting, secure bounded file traversal, and deterministic discovery; the client renders scanner findings, manual edits, and simulation without executing source.
 
+**Task 3 implementation note:** Network access was restored before implementation; the frontend uses the preferred React + TypeScript + Vite + React Flow + Zustand stack. Vite bundles the frontend and the Node server serves only the built index and constrained hashed assets on loopback.
+
 **Tech Stack:** React, TypeScript, Vite, React Flow, Zustand, Node.js, shared JSON schema, Vitest, and Playwright browser tests where the browser tooling is available.
 
 **Spec:** `docs/superpowers/specs/2026-11-02-flow-atlas-design.md`
@@ -68,10 +70,10 @@
 
 **Interfaces:** Store actions `addNode(type, position)`, `connect(source, target)`, `replaceGraph(document)`, `setFilters(filters)`, `setSimulation(settings)`. UI consumes `GraphDocument`, calls `GET /api/roots` and `POST /api/discover { rootId }`, and offers details for node/edge evidence. Manual editing covers six node types, connections, presets, and validated JSON import/export.
 
-- [ ] **RED** Add component/store tests for node add/connect, preset load, invalid JSON not replacing graph, root selection/discovery, edge evidence inspector, filtering, and simulation controls; run targeted tests and observe failure.
-- [ ] **GREEN** Implement a responsive React Flow atlas, clear toolbar/discovery flow, inspector and evidence display, filters, and simulation pause/resume/intensity/failure/recovery/retry controls. Use discovered graph through the shared contract; keep manual edits and imports local.
-- [ ] **VERIFY** Run UI tests and build/typecheck; confirm scanner evidence remains visible through filtering and import/export retains graph semantics.
-- [ ] **COMMIT** `git add ... && git commit -m "feat: build interactive flow atlas editor"`.
+- [x] **RED** Add store regression tests for simulation state preservation and imported ID collisions; run targeted tests and observe failure.
+- [x] **GREEN** Implement the responsive React Flow atlas, inspector/evidence, filters, discovery, import/export, and deterministic simulation controls.
+- [x] **VERIFY** Run Node unit tests, TypeScript check, production build, and Playwright browser flow; verify static assets are bundled and restricted.
+- [x] **COMMIT** Commit Task 3 implementation and record the review package; implementation is awaiting review.
 
 ## Task 4: End-to-end safety, review, docs, and publish-ready state
 

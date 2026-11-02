@@ -10,12 +10,21 @@ Environment check performed 2026-11-02 for the Flow Atlas local MVP setup.
 - Bun 1.3.12
 - Semgrep 1.183.0
 - Gitleaks 8.30.1
-- Playwright browser cache: Chromium and headless-shell revisions 1248 and 1252, plus ffmpeg 1013 (cache present; no standalone `playwright` command).
+- Alibaba Open Code Review (OCR) 1.13.3 (`ocr`; package `@alibaba-group/open-code-review`). The CLI is verified; LLM provider/model configuration and ChatGPT sign-in have not been verified.
+- Playwright browser cache: Chromium and headless-shell revisions 1248 and 1252, plus ffmpeg 1013 (cache present; browser tests run through the npm Playwright package).
 
 ## Not found / blocked
 
 - `gh`, `pnpm`, and standalone `playwright` commands are not installed/on PATH.
 - Alibaba/custom git-skill command candidates (`alibaba-git-skill`, `git-skill`) were not found.
-- GitHub access is blocked by the current CONNECT proxy (502). A non-installing `npm view react version` probe also failed with registry HTTP 502; dependency installation was not attempted.
+- Earlier checks encountered GitHub CONNECT proxy and npm registry HTTP 502 errors; these are historical and do not establish current endpoint availability.
 
-No dependencies were installed and no product code was added in this setup step.
+## Network status
+
+- On 2026-11-02, `https://raw.githubusercontent.com/alibaba/open-code-review/v1.13.3/README.md` and `https://registry.npmjs.org/@alibaba-group%2Fopen-code-review/latest` both returned HTTP 200. This does not establish that all network endpoints work or that npm dependency builds have been tested.
+
+The initial setup did not install project dependencies. For Task 3, network access was restored and the project's pinned frontend/tooling dependencies were installed locally.
+
+## Task 3 frontend
+
+The browser application uses React, TypeScript, Vite, `@xyflow/react`, and Zustand. `npm start` builds the frontend and serves it with the Node API on loopback; `npm run build` runs the Vite production build, `npm run typecheck` checks TypeScript, `npm test` runs native Node tests (after building), and `npm run test:e2e` runs the Playwright browser flow. Browser and native test fixtures use only the synthetic allowed repository.

@@ -7,3 +7,6 @@ coverage/
 !.env.example
 *.log
 .superpowers/sdd/
+.playwright-mcp/
+test-results/
+playwright-report/

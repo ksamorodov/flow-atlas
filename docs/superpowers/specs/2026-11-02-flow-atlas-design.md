@@ -33,6 +33,8 @@ Flow Atlas is a local-first tool for developers to see how services in a Java/Sp
 
 ## Design decisions
 
+- **Task 3 implementation:** network access was restored and the preferred React + TypeScript + Vite + React Flow + Zustand stack is used. Vite bundles all frontend dependencies locally; the localhost Node server exposes only the built index and strict hashed-asset allowlist. Native Node tests remain in use for backend and shared modules.
+
 - Keep a shared, versioned JSON graph model for manual and discovered graphs. Stable IDs, typed nodes, edges, positions, and evidence make import/export and frontend/backend boundaries explicit.
 - Use deterministic rule-based parsing and normalized paths/line references. Findings deduplicate by stable identity; confidence is explicit, never silently promoted to certainty.
 - Model the simulation as a pure deterministic transformation of graph + simulation settings + seed/time step. No network or wall-clock dependencies; metrics derive from topology and configurable intensity.
