@@ -1,5 +1,5 @@
 import { NODE_TYPES } from './shared/graph.ts';
-import type { AtlasEdge } from './shared/graph.ts';
+import type { AtlasEdge, AtlasNode, GraphDocument } from './shared/graph.ts';
 import { stepSimulation } from './shared/simulation.ts';
 import { createPreset } from './shared/presets.ts';
 import { createGraphStore } from './store/graph-store.ts';
@@ -25,29 +25,41 @@ const graphHost = appRoot.querySelector<HTMLElement>('#graph')!;
 const view = new GraphView(graphHost, store, () => frame.nodes);
 const inspector = appRoot.querySelector<HTMLElement>('#inspector-body')!;
 const filtersEl = appRoot.querySelector<HTMLElement>('#filters')!;
+let inspectorGraph: GraphDocument | null = null, inspectorNodeId: string | null = null, inspectorEdgeId: string | null = null;
+let filtersGraph: GraphDocument | null = null;
+let renderedFilters: ReturnType<typeof store.getState>['filters'] | null = null;
 const names: Record<string, string> = { service: 'Microservice', database: 'PostgreSQL', cache: 'Redis', topic: 'Kafka topic', external: 'External API', gateway: 'API Gateway' };
 const safeText = (value: unknown, fallback = '') => typeof value === 'string' ? value : fallback;
 function showToast(message: string, error = false) { const toast = appRoot.querySelector<HTMLElement>('#toast')!; toast.textContent = message; toast.classList.toggle('error', error); toast.hidden = false; window.clearTimeout(toastTimer); toastTimer = window.setTimeout(() => { toast.hidden = true; }, 3400); }
 function button(action: string, title: string, klass = 'subtle-button') { const element = document.createElement('button'); element.type = 'button'; element.className = klass; element.dataset.action = action; element.textContent = title; return element; }
 function field(label: string, value: string, testId: string) { const wrap = document.createElement('label'); wrap.className = 'field'; wrap.textContent = label; const input = document.createElement('input'); input.value = value; input.dataset.testid = testId; wrap.append(input); return { wrap, input }; }
 function renderFilters() {
-  const graph = store.getState().graph, protocols = [...new Set(graph.edges.flatMap((edge) => [edge.protocol ?? 'manual', ...edge.evidence.map((item) => item.protocol)]))].sort();
+  const state = store.getState(), graph = state.graph;
+  if (filtersGraph === graph && renderedFilters === state.filters) return;
+  filtersGraph = graph; renderedFilters = state.filters;
+  const protocols = [...new Set(graph.edges.flatMap((edge) => [edge.protocol ?? 'manual', ...edge.evidence.map((item) => item.protocol)]))].sort();
   const repositories = [...new Set(graph.nodes.flatMap((node) => typeof node.data.repository === 'string' ? [node.data.repository] : []))].sort();
-  filtersEl.replaceChildren(); const filters = store.getState().filters;
+  filtersEl.replaceChildren(); const filters = state.filters;
   for (const [category, values] of [['protocols', protocols], ['confidences', ['HIGH', 'MEDIUM', 'LOW']], ['repositories', repositories]] as const) for (const value of values) {
     const chip = button('filter', value, `filter-chip${filters[category].includes(value) ? ' active' : ''}`); chip.dataset.category = category; chip.dataset.value = value; filtersEl.append(chip);
   }
   const visible = selectVisibleGraph(graph, filters); appRoot.querySelector('#filter-count')!.textContent = `· ${visible.edges.length}/${graph.edges.length} edges`;
 }
 function renderInspector() {
-  inspector.replaceChildren(); const state = store.getState(), node = state.graph.nodes.find((item) => item.id === state.selectedNodeId), edge = state.graph.edges.find((item) => item.id === state.selectedEdgeId);
+  const state = store.getState(), node = state.graph.nodes.find((item) => item.id === state.selectedNodeId), edge = state.graph.edges.find((item) => item.id === state.selectedEdgeId);
+  if (inspectorGraph === state.graph && inspectorNodeId === state.selectedNodeId && inspectorEdgeId === state.selectedEdgeId) {
+    if (node) updateInspectorMetrics(node);
+    return;
+  }
+  inspectorGraph = state.graph; inspectorNodeId = state.selectedNodeId; inspectorEdgeId = state.selectedEdgeId;
+  inspector.replaceChildren();
   const kind = appRoot.querySelector<HTMLElement>('[data-testid="inspector-kind"]')!; kind.textContent = edge ? 'Dependency inspector' : 'Node inspector';
   if (edge) { renderEdgeInspector(edge); return; }
   if (!node) { const h = document.createElement('h2'); h.textContent = 'Select a service'; inspector.append(h); const p = document.createElement('p'); p.textContent = 'Choose any node to inspect its runtime health, dependencies, and source evidence.'; inspector.append(p); return; }
   const metric = frame.nodes.find((entry) => entry.id === node.id), title = document.createElement('h2'); title.textContent = safeText(node.data.label, safeText(node.data.name, node.id)); inspector.append(title);
   const type = document.createElement('span'); type.className = 'type-tag'; type.textContent = names[node.type] ?? node.type; inspector.append(type);
-  const p = document.createElement('p'); p.textContent = `${safeText(node.data.repository, 'Manual node')} · ${metric?.status ?? 'healthy'} · ${node.id}`; inspector.append(p);
-  const grid = document.createElement('div'); grid.className = 'detail-grid'; for (const [name, value] of [['Throughput', `${metric?.rps ?? 0} req/s`], ['Latency', `${metric?.latencyMs ?? 0} ms`], ['Error rate', `${Math.round((metric?.errorRate ?? 0) * 100)}%`], ['Dependencies', `${state.graph.edges.filter((item) => item.source === node.id || item.target === node.id).length}`]]) { const cell = document.createElement('div'); cell.className = 'detail-cell'; const caption = document.createElement('span'); caption.textContent = name; const content = document.createElement('strong'); content.textContent = value; cell.append(caption, content); grid.append(cell); } inspector.append(grid);
+  const p = document.createElement('p'); p.dataset.testid = 'inspector-status'; p.textContent = `${safeText(node.data.repository, 'Manual node')} · ${metric?.status ?? 'healthy'} · ${node.id}`; inspector.append(p);
+  const grid = document.createElement('div'); grid.className = 'detail-grid'; for (const [name, value] of [['Throughput', `${metric?.rps ?? 0} req/s`], ['Latency', `${metric?.latencyMs ?? 0} ms`], ['Error rate', `${Math.round((metric?.errorRate ?? 0) * 100)}%`], ['Dependencies', `${state.graph.edges.filter((item) => item.source === node.id || item.target === node.id).length}`]]) { const cell = document.createElement('div'); cell.className = 'detail-cell'; const caption = document.createElement('span'); caption.textContent = name; const content = document.createElement('strong'); if (name !== 'Dependencies') content.dataset.metricValue = name; content.textContent = value; cell.append(caption, content); grid.append(cell); } inspector.append(grid);
   const edit = document.createElement('div'); edit.className = 'section'; const heading = document.createElement('div'); heading.className = 'section-title'; heading.textContent = 'Service details'; edit.append(heading);
   const labelField = field('Display name', safeText(node.data.label, safeText(node.data.name, node.id)), 'edit-node-label'); labelField.input.addEventListener('change', () => store.renameNode(node.id, labelField.input.value)); edit.append(labelField.wrap);
   const typeField = document.createElement('label'); typeField.className = 'field'; typeField.textContent = 'Node type'; const select = document.createElement('select'); select.dataset.testid = 'edit-node-type'; for (const typeName of NODE_TYPES) { const option = document.createElement('option'); option.value = typeName; option.textContent = names[typeName] ?? typeName; option.selected = node.type === typeName; select.append(option); } select.addEventListener('change', () => store.changeNodeType(node.id, select.value as typeof node.type)); typeField.append(select); edit.append(typeField);
@@ -55,6 +67,19 @@ function renderInspector() {
   const evidence = document.createElement('div'); evidence.className = 'section'; const evidenceTitle = document.createElement('div'); evidenceTitle.className = 'section-title'; evidenceTitle.textContent = 'Dependency evidence'; evidence.append(evidenceTitle); const related = state.graph.edges.filter((item) => item.source === node.id || item.target === node.id); if (!related.length) { const empty = document.createElement('div'); empty.className = 'empty-evidence'; empty.textContent = 'No dependency evidence attached. Manual relationships are never represented as source findings.'; evidence.append(empty); } else for (const item of related) { const itemButton = button('select-edge', `${item.source} → ${item.target} · ${(item.protocol ?? 'manual').toUpperCase()}`, 'evidence-item'); itemButton.dataset.edgeId = item.id; const small = document.createElement('small'); small.textContent = item.evidence.length ? `${item.evidence.length} source ${item.evidence.length === 1 ? 'reference' : 'references'} · inspect all evidence` : 'Manual edge · no source evidence'; itemButton.append(small); evidence.append(itemButton); }
   inspector.append(edit, conn, evidence);
   const actionRow = document.createElement('div'); actionRow.className = 'section'; const remove = button('delete-node', 'Delete node and dependencies', 'subtle-button danger'); remove.dataset.testid = 'delete-node'; actionRow.append(remove); inspector.append(actionRow);
+}
+function updateInspectorMetrics(node: AtlasNode) {
+  const metric = frame.nodes.find((entry) => entry.id === node.id);
+  const status = inspector.querySelector<HTMLElement>('[data-testid="inspector-status"]');
+  if (status) status.textContent = `${safeText(node.data.repository, 'Manual node')} · ${metric?.status ?? 'healthy'} · ${node.id}`;
+  const values: Record<string, string> = {
+    Throughput: `${metric?.rps ?? 0} req/s`, Latency: `${metric?.latencyMs ?? 0} ms`,
+    'Error rate': `${Math.round((metric?.errorRate ?? 0) * 100)}%`,
+  };
+  for (const [label, value] of Object.entries(values)) {
+    const element = inspector.querySelector<HTMLElement>(`[data-metric-value="${label}"]`);
+    if (element) element.textContent = value;
+  }
 }
 function renderEdgeInspector(edge: AtlasEdge) {
   const title = document.createElement('h2'); title.textContent = `${edge.source} → ${edge.target}`; inspector.append(title); const tag = document.createElement('span'); tag.className = 'type-tag'; tag.textContent = (edge.protocol ?? 'manual').toUpperCase(); inspector.append(tag);
@@ -74,7 +99,15 @@ function renderMetrics() {
   appRoot.querySelector<HTMLElement>('#intensity-label')!.textContent = `${store.getState().simulation.intensity} / 10`;
 }
 function render() { renderMetrics(); renderInspector(); renderFilters(); view.render(); }
-store.subscribe(render);
+let observedGraph = store.getState().graph;
+store.subscribe(() => {
+  const state = store.getState();
+  if (state.graph !== observedGraph) {
+    observedGraph = state.graph;
+    frame = stepSimulation(state.graph, state.simulation, 1847, state.tick);
+  }
+  render();
+});
 
 async function loadRoots() {
   const status = appRoot.querySelector<HTMLElement>('#discovery-status')!, select = appRoot.querySelector<HTMLSelectElement>('#root-select')!;
